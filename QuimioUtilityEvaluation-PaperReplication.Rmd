@@ -26,7 +26,6 @@ Para este estudio hemos usado datos clínicos de pacientes con cancer de mama. L
 ## Cargar tabla
 
 ```{r, warning=FALSE, message=FALSE, echo=FALSE}
-setwd("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/")
 CTS5.data<-read.csv("CTS5_RWD_analisis.csv", dec=",", header=T, sep=";")
 dim(CTS5.data)
 str(CTS5.data)
@@ -207,9 +206,6 @@ BC<-CTS5.data
 
 Los grupos están bien proporcionados, teniendo su mayor concentración de pacientes el grupo comprendido entre la edad $48$ y $63$ años.
 
-```{r, echo=FALSE, eval=FALSE}
-write.csv(BC, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/")
-```
 
 # Análisis
 
