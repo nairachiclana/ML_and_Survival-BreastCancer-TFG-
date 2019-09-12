@@ -6,4 +6,4 @@ This repository contains the steps for making a survival predictor for breast ca
 - `Datos-analisis`contains the evaluation of the stratifications using statistical methods.
 - `Modelos ML` contains the data replication, the overview of performance in survival and classification models using mlr, and finally the exploration of probabilistic classification models using h2o.
 
-*ShinyApp* folder contains the code of an interface made for showing the survival curves resulting of the parameters given as input.
+*ShinyApp* folder contains the code of an interface made for showing the survival curves (for each posible hormonotherapy treatment) resulting of the parameters given as input.
