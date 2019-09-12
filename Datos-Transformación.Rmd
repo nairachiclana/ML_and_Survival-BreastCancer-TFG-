@@ -1,0 +1,933 @@
+---
+title: "Datos-Tratamiento"
+author: "Naira Chiclana García 44717497T"
+date: "Julio 2019"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# CTS5
+
+
+```{r, message=FALSE}
+library(mlr)
+library(party)
+```
+
+Read dataset
+
+```{r, message=FALSE, echo=FALSE}
+df.cts5<-read.csv("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/last_CTS5_arreglada.csv", dec=",", header=T)
+
+#df.cts5<-read.csv("C:\\Users\\nchiclana\\Google Drive\\TFG\\FEATURES\\datasets\\last_CTS5_arreglada.csv", dec=",", header=T)
+```
+
+
+## Tratamiento
+
+Formato 
+
+```{r}
+df.cts5$tumor_size<-as.numeric(df.cts5$tumor_size)
+df.cts5$score<-as.numeric(df.cts5$score)
+df.cts5$seguimiento_years<-as.numeric(as.character(df.cts5$seguimiento_years))
+df.cts5$ki67<-as.factor(df.cts5$ki67)
+df.cts5$grado<-as.factor(df.cts5$grado)
+df.cts5$gg_extraidos<-round(df.cts5$gg_extraidos)
+df.cts5$ki67<-as.numeric(as.character(df.cts5$ki67))
+```
+
+Eliminar 
+
+```{r}
+df.cts5<-df.cts5[, !names(df.cts5) %in% c("X", "n_orden", "gg_score", "fecha_tratamiento", "fecha_ultimo_control", "fecha_diagnostico", "HR_status", "GrupoEdadCluster", "estado_ultimo_control")]
+
+#df.cts5<-df.cts5[as.factor(df.cts5$estado_ultimo_control)!="MXE",]
+df.cts5<-df.cts5[as.factor(df.cts5$ht)!="ANALOGOS",]
+df.cts5<-df.cts5[as.factor(df.cts5$ht)!="TAMOXIFENO-ANALOGOS-IA",]
+df.cts5<-df.cts5[as.factor(df.cts5$rp)!="ND",]
+df.cts5<-df.cts5[as.factor(df.cts5$her2)!="2+",]
+
+df.cts5<-na.omit(df.cts5)
+```
+
+Nomenclatura
+
+```{r}
+df.cts5$ht<-factor(df.cts5$ht, labels=c("IA", "TAMOXIFENO", "IA", "IA", "TAMOXIFENO", "TAMOXIFENO-IA"))
+df.cts5$grado<-factor(df.cts5$grado, labels=c("I", "II", "III"))
+
+colnames(df.cts5)[which(names(df.cts5)=="tumor_size_group")] <- "tumor_size_group_paper_score"
+colnames(df.cts5)[which(names(df.cts5)=="nodal_status")] <- "nodal_status_standard_paper_score"
+colnames(df.cts5)[which(names(df.cts5)=="ki67_status")] <- "ki67_status_paper_score"
+colnames(df.cts5)[which(names(df.cts5)=="score")] <- "score_paper_score"
+colnames(df.cts5)[which(names(df.cts5)=="ht")] <- "hormonoteraphy"
+colnames(df.cts5)[which(names(df.cts5)=="fenotipo_ihq")] <- "subtipo_bc_Nuria-ki67"
+
+```
+
+
+## Creación de variables
+
+
+```{r}
+#Status receptores de hormonas
+
+her2_status<-vector()
+for (r in 1:nrow(df.cts5)) {
+  her2=df.cts5$her2[r]
+  if(her2==0 || her2=="1+" || her2=="N") her2_status[r]="her2_negative"
+  else if(her2=="3+") her2_status[r]="her2_positive"
+} 
+df.cts5$her2_status<-as.factor(her2_status)
+
+re_status<-vector()
+for (r in 1:nrow(df.cts5)) {
+  re=df.cts5$re[r]
+  if(re==0 || re=="N") re_status[r]="re_negative"
+  else  re_status[r]="re_positive"
+} 
+df.cts5$re_status<-as.factor(re_status)
+
+
+rp_status<-vector()
+for (r in 1:nrow(df.cts5)) {
+  rp=df.cts5$rp[r]
+  if(rp==0 || rp=="N") rp_status[r]="rp_negative"
+  else  rp_status[r]="rp_positive"
+} 
+df.cts5$rp_status<-as.factor(rp_status)
+
+hormone_receptor<-vector()
+for (r in 1:nrow(df.cts5)) {
+  re=df.cts5$re_status[r]
+  rp=df.cts5$rp_status[r]
+  her2=df.cts5$her2_status[r] 
+  
+  if(re=="re_positive" && rp=="rp_negative")  hormone_receptor[r]="Estrogen-receptor-positive"
+  else if(re=="re_positive" && rp=="rp_positive") hormone_receptor[r]="Estrogen-and-Progesterone-receptor-positive"
+  else if(her2=="her2_negative" && re=="re_negative" && rp=="rp_negative")  hormone_receptor[r]="Triple Negative"
+  else hormone_receptor[r]="Other"
+}
+df.cts5$hormone_receptor<-as.factor(hormone_receptor)
+
+
+#Tumor stage (standar medicina)
+
+tumor_stage_standard<-vector() 
+for (r in 1:nrow(df.cts5)) {
+  t_size=df.cts5$tumor_size[r]
+  
+  if(t_size==0)  tumor_stage_standard[r]="T0"
+  else if(t_size>0 && t_size <=20)  tumor_stage_standard[r]="T1"
+  else if(t_size>20 && t_size <=50)  tumor_stage_standard[r]="T2"
+  else if(t_size >50)  tumor_stage_standard[r]="T3"
+
+}
+df.cts5$tumor_stage_standard<-as.factor(tumor_stage_standard)
+
+#Estadio -> #Falta cubrir gg>0 para T1 y T3
+#estadio<-vector() # ME FALTAN DATOS, VER https://seom.org/info-sobre-el-cancer/cancer-de-mama?showall=1
+#for (r in 1:nrow(df.cts5)) {
+#  t_size=df.cts5$tumor_size[r]
+#  gg=df.cts5$gg_afectados[r]
+#  ts=df.cts5$tumor_stage_standard[r]
+
+#  if((ts=="T0" || ts=="T1") && gg==0)  estadio[r]="I"
+#  else if((ts=="T2") || (ts=="T3" && gg==0))  estadio[r]="II"
+#  else if(ts=="T3" && gg>0) estadio[r]="III"
+#  else if(gg>10) estadio[r]="IIIC"
+#}
+#df.cts5$estadio<-as.factor(estadio)
+
+#Subtipo BC
+subtipo_bc<-vector() 
+for (r in 1:nrow(df.cts5)) {
+  re=df.cts5$re_status[r]
+  rp=df.cts5$rp_status[r]
+  her2=df.cts5$her2_status[r]
+  hr=df.cts5$hormone_receptor[r]
+  
+  if(hr=="Estrogen-and-Progesterone-receptor-positive"  && her2=="her2_negative")  subtipo_bc[r]="Luminal_A" 
+  else if(hr=="Estrogen-receptor-positive")  subtipo_bc[r]="Luminal_B" #HE QUITADO CONDICION HER2 POSITIVO DE AQUI, COMPROBAR SI DEBERÍA IR 
+  else if(re=="re_negative" && rp=="rp_negative" && her2=="her2_positive")  subtipo_bc[r]="HER2_positivo"
+  else if(hr=="Triple Negative")  subtipo_bc[r]="Basal" #Tripe negativo
+  else  subtipo_bc[r]="Other" #error lab: rp positive y re negative
+}
+df.cts5$subtipo_bc<-as.factor(subtipo_bc)
+
+df.cts5<-df.cts5[as.factor(df.cts5$subtipo_bc)!="Other",]
+
+#Age standard
+age_standard<-vector() 
+for (r in 1:nrow(df.cts5)) {
+  age=df.cts5$edad[r]
+  if(age<=50)  age_standard[r]="<=50"
+  else age_standard[r]=">50"
+}
+df.cts5$age_standard<-as.factor(age_standard)
+
+#ki67 standard
+ki67_standard<-vector() 
+for (r in 1:nrow(df.cts5)) {
+  ki67=df.cts5$ki67[r]
+  if(ki67<=14)  ki67_standard[r]="<=14%"
+  else ki67_standard[r]=">14%"
+}
+df.cts5$ki67_standard<-as.factor(ki67_standard)
+
+
+```
+
+
+## Summary
+
+```{r}
+str(df.cts5)
+dim(df.cts5)
+```
+
+```{r, warning=FALSE}
+summary(df.cts5)
+```
+
+### Distribución numéricas
+
+```{r}
+par(mfrow=c(3,2))
+#DISTRIBUCÓN NORMAL
+hist(df.cts5$edad, main="Histograma Edad pacientes", xlab="Edad")
+
+
+#RIGHT-SKEWED
+hist(df.cts5$ki67, main="Histograma ki67", xlab="% ki67")
+hist(df.cts5$gg_afectados, main="Histograma Gánglios afectados", xlab="Número ganglios afectados")
+hist(df.cts5$gg_extraidos, main="Histograma Gánglios extraidos", xlab="Número ganglios extraidos")
+hist(df.cts5$tumor_size, main="Histograma tamaño tumor", xlab="Tamaño tumor")
+
+hist(df.cts5$seguimiento_years, main="Histograma tiempo seguimiento pacientes", xlab="Años")
+```
+
+
+
+```{r}
+par(mfrow=c(2,3))
+boxplot(df.cts5$edad, main="Boxplot Edad")
+boxplot(df.cts5$ki67, main="Boxplot ki67")
+boxplot(df.cts5$gg_afectados, main="Boxplot Gánglios afectados")
+boxplot(df.cts5$gg_extraidos, main="Boxplot Gánglios extraidos")
+boxplot(df.cts5$tumor_size, main="Boxplot Tamaño tumor")
+boxplot(df.cts5$seguimiento_years, main="Boxplot Años seguimiento pacientes")
+
+```
+
+
+```{r, eval=FALSE}
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+
+colnames(df.cts5)[which(names(df.cts5)=="subtipo_bc_Nuria-ki67")] <- "subtipo_bc_Nuria_ki67"
+levels(df.cts5$hormone_receptor)=c("Estrog+Progest + ", "Estrogen +", "other")
+
+#CATEGÓRICAS
+g_menop<-ggplot(df.cts5, aes(estado_menop)) + geom_bar(aes(fill=estado_menop)) +theme_minimal() + theme(legend.position = "none") + geom_bar(fill="gray33")+ labs(x = "Estado menopausico")
+g_grado<-ggplot(df.cts5, aes(grado)) + geom_bar(aes(fill=grado)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Grado")
+g_hormone_receptor<-ggplot(df.cts5, aes(hormone_receptor)) + geom_bar(aes(fill=hormone_receptor)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Receptor hormonal")
+g_subtipo<-ggplot(df.cts5, aes(subtipo_bc_Nuria_ki67)) + geom_bar(aes(fill=subtipo_bc_Nuria_ki67)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Subtipo cancer")
+g_riesgo<-ggplot(df.cts5, aes(riesgo)) + geom_bar(aes(fill=riesgo)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Riesgo")
+g_hormo<-ggplot(df.cts5, aes(hormonoteraphy)) + geom_bar(aes(fill=hormonoteraphy)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Hormonoterapia")
+g_estado<-ggplot(df.cts5, aes(estado_ultimo_control)) + geom_bar(aes(fill=estado_ultimo_control)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Estado último control")
+
+grid.arrange(g_menop,g_grado,g_hormone_receptor, g_subtipo, ncol=2, nrow=2)
+grid.arrange(g_riesgo,g_hormo,g_estado, ncol=2, nrow=2)
+
+freq_evento <- table(df.cts5$evento)
+pct<-round(freq_evento/nrow(df.cts5)*100)
+lbls <- paste(names(freq_evento), pct)
+lbls <- paste(lbls, "%", sep="")
+pie(freq_evento, labels = lbls, main="Diagrama de tarta evento", col=c("lightblue1", "firebrick1"))
+```
+
+
+### Clusters
+
+```{r, message=FALSE}
+library(factoextra)
+library(clValid)
+library(NbClust)
+library(FSelector)
+
+library(fpc)
+library(cluster)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+
+library(intrval)
+```
+
+```{r}
+set.seed(123)
+```
+
+**DISPERSIÓN**
+
+```{r}
+par(mfrow=c(2,3))
+plot(df.cts5$edad, main="Distribución Edad") #kmeans obviously
+plot(df.cts5$ki67, main="Distribución ki67")
+plot(df.cts5$gg_afectados, main="Distribución Gánglios afectados")
+plot(df.cts5$gg_extraidos, main="Distribución Gánglios extraidos") #kmeans
+plot(df.cts5$tumor_size, main="Distribución Tamaño tumor")
+```
+
+No hay ninguna distribución con forma particular que impidiera el buen funcionamiento de $kmeans$ o $hierarchical-clustering$.
+
+
+
+**Clustering Methods**:
+
+- **Kmeans**
+
+- **Hierarchical**
+
+
+**Internal Validation measures for clusters**: the aim is to identify sets of clusters that are compact, with a small variance between members of the cluster, and well separated, where the means of different clusters are sufficiently far apart, as compared to the within cluster variance. 
+
+
+- **Connectivity index**: Connectivity indicates the degree of *connectedness* of the clusters, as determined by k-nearest neighbors. Connectedness corresponds to what extent items are placed in the same cluster as their nearest neighbors in the data space. The connectivity has a value between 0 and infinity and should be **minimized**.
+
+
+- **Dunn index (DI)**: A **higher** Dunn index indicates **better** clustering (It assumes that better clustering means that clusters are compact and well-separated from other clusters). ${\displaystyle DI=\frac{minimum\ intercluster\ distance}{maximum\ cluster\ size}={\frac {\min \limits _{1\leq i\leq j\leq m}\delta (C_{i},C_{j})}{\max \limits _{1\leq k\leq m}\Delta _{k}}}}$.  Note that larger inter-cluster distances (better separation) and smaller cluster sizes (more compact clusters) lead to a higher DI value.
+
+- **Silhouette index**: Is a measure of **how similar an object is to its own cluster (cohesion) compared to other clusters (separation)**. The silhouette ranges from **−1 to +1**, where a high value indicates that the object is well matched to its own cluster and poorly matched to neighboring clusters, and -1 that it should belong to neighbour cluster. 0 means that the datum is on the border of two natural clusters. If most objects have a high value, then the clustering configuration is appropriate. If many points have a low or negative value, then the clustering configuration may have too many or too few clusters. $s(i)=\frac{b(i)−a(i)}{max{a(i),b(i)}}, −1≤s(i)≤1$.
+
+
+- **Elbow method**: Analiza el porcentaje de variación según el número de clusters. El número más adecuado de clusters es aquel que añadiendo otro no hay demasiados cambios en el dataset (Primeros clusters añaden muchos cambios y varianza y más clusters caerá la ganancia marginal(??) y se empezarán a ser estables ("codo o elbow")). El método usado *wss*:  total within sum of squares (de entre todas las observaciones, la suma del cuadrado de las diferencias de cada observación conla media). "número de clusters máximo más adecuado xq a partir de ahí SSE se estabiliza" *Total sum of squares=${\mathrm  {TSS}}=\sum _{{i=1}}^{{n}}\left(y_{{i}}-{\bar  {y}}\right)^{2}$
+
+
+Silhouette index + Elbow K evaluation
+
+```{r, warning=FALSE}
+
+evaluation.silhouette.elbow<-function(df.colum)  { 
+  p1<-fviz_nbclust(df.colum, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method") +geom_vline(xintercept = 2, linetype = 2)
+  p2<-fviz_nbclust(df.colum, kmeans, method = "wss") +geom_vline(xintercept = 4, linetype = 2)+labs(subtitle = "Elbow method")
+  grid.arrange(p1,p2, ncol=1, nrow=2)
+}
+
+```
+
+Cl valid
+
+```{r}
+evaluation.cl_valid<-function(df.colum, max_k) {
+   cl_intern<-clValid(scale(df.colum), nClust = 2:max_k, clMethods = c("hierarchical","kmeans"), validation = "internal", maxitems=nrow(df.colum))
+  par(mfrow = c(2, 2))
+  plot(cl_intern)
+  summary(cl_intern)
+}
+```
+
+
+Evaluate hierarchical
+
+
+```{r}
+hierarchical.best.method<-function(df.colum, clustering.types,k) {
+  d<-dist(df.colum, method="euclidean") 
+  for(m in 1:length(clustering.types)) {assign(paste("p",m,sep=""),fviz_nbclust(df.colum, FUNcluster=hcut, method ="silhouette", diss=d, hc_method=clustering.types[m], k.max=k+1)+labs(title=clustering.types[m])) }
+  grid.arrange(p1, p2, p3, ncol = 2)
+}
+
+clustering.types<-c("average", "complete", "single")
+```
+
+Make cluster
+
+```{r}
+make.cluster.isolated<-function(df.colum, cluster_method, k, hierarchical_method) { 
+  
+if(cluster_method=="kmeans") {
+    k.means.fit <- kmeans(df.colum, k)
+    k.means.fit$size
+     #clusplot(df.colum, k.means.fit$cluster, main='2D representation of the Cluster solution',color=TRUE, shade=TRUE)
+    return(k.means.fit)
+}
+  
+#hiearchical method: complete, single, average, ward: FUNCIOÓN QUE VEA CUAL ES EL MEJOR
+  else if(cluster_method=="hierarchical") {
+    df.colum<-scale(df.colum)
+    d<-dist(df.colum, method="euclidean")
+    hierarchiclal.fit<-hclust(d, method=hierarchical_method) #EXPLICAR METODOS
+    plot(hierarchiclal.fit, hang=-1)
+    rect.hclust(hierarchiclal.fit,k,border=2:(2+k))
+    groups<-cutree(hierarchiclal.fit,k=k)
+    return(groups)
+  }
+  
+}
+
+```
+
+- **Edad**
+
+
+
+```{r, warning=FALSE}
+df.colum<-as.data.frame(df.cts5$edad)
+evaluation.silhouette.elbow(df.colum)
+```
+
+
+```{r, warning=FALSE}
+evaluation.cl_valid(df.colum, 7)
+```
+
+kmeans con k=4:
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 4, "-")
+df.colum$cl=kmeans.fit$cluster
+#table(df.colum[,1][df.colum$cl==1])
+df.cts5$edad_Kmeans_k4<-cut(df.cts5$edad, breaks=c(0,44,56,69,100))
+table(df.cts5$edad_Kmeans_k4)
+```
+
+
+```{r, message=FALSE}
+g_cluster_edad1<-ggplot(df.cts5, aes(x=edad, fill=edad_Kmeans_k4, color=edad_Kmeans_k4)) +
+  geom_histogram(position="identity", alpha=0.8)  +theme(legend.position="top") 
+g_cluster_edad1
+```
+
+
+
+
+- **Tumor_size** (*ya hecho como en paper*)
+
+
+
+```{r}
+evaluation.silhouette.elbow(df.colum)
+```
+
+
+```{r, warning=FALSE}
+evaluation.cl_valid(df.colum, 7)
+```
+
+2 Clusters con hierarchical
+
+```{r}
+hierarchical.best.method(df.colum, clustering.types,2)
+```
+
+```{r}
+df.colum$cl<-make.cluster.isolated(df.colum, "hierarchical", 2, "average")
+
+table(df.colum$cl)
+
+df.cts5$tumor_size_hier_k2<-cut(df.cts5$tumor_size, breaks=c(0,27,60))
+table(df.cts5$tumor_size_hier_k2)
+```
+
+
+3 clusters con k means
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 3, "-")
+df.colum$cl=kmeans.fit$cluster
+#table(df.colum$cl)
+df.cts5$tumor_size_Kmeans_k3<-cut(df.cts5$tumor_size, breaks=c(0,12,31,58))
+table(df.cts5$tumor_size_Kmeans_k3)
+```
+
+```{r, message=FALSE}
+ph2<-ggplot(df.cts5, aes(x=tumor_size, fill=tumor_size_hier_k2, color=tumor_size_hier_k2)) +
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+pk3<-ggplot(df.cts5, aes(x=tumor_size, fill=tumor_size_Kmeans_k3, color=tumor_size_Kmeans_k3)) + 
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+grid.arrange(ph2, pk3, ncol=2)
+```
+
+- **gg_afectados** 
+
+
+```{r, warning=FALSE}
+df.colum<-as.data.frame(df.cts5$gg_afectados)
+evaluation.silhouette.elbow(df.colum)
+```
+
+
+```{r, warning=FALSE}
+evaluation.cl_valid(df.colum, 7)
+```
+
+kmeans con k=2:
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 2, "-")
+df.colum$cl=kmeans.fit$cluster
+table(df.colum$cl)
+#table(df.colum[,1][df.colum$cl==1])
+df.cts5$nodal_status_Kmeans_k2<-cut(df.cts5$gg_afectados, breaks=c(-1,4,25))
+table(df.cts5$nodal_status_Kmeans_k2)
+```
+
+hierarchical con k=4+negativeve(gg=0)
+
+```{r}
+hierarchical.best.method(df.colum, clustering.types,4) #es =
+grupos<-make.cluster.isolated(df.colum, "hierarchical", 4, "single")
+table(grupos)
+#grupos_kmeans<-make.cluster.isolated(df.colum, "kmeans", 4, "-")
+#table(grupos_kmeans$cluster)
+
+df.colum$cl=grupos
+#df.cts5$gg_afectados_hier_k5<-cut(df.cts5$gg_afectados, breaks=c(-1,0,4,10,21,25))
+#table(df.cts5$gg_afectados_hier_k5)
+```
+
+```{r}
+df.cts5$nodal_status_hier_k3<-cut(df.cts5$gg_afectados, breaks=c(-1,0,10,25))
+table(df.cts5$nodal_status_hier_k3)
+```
+
+
+```{r, message=FALSE}
+pk2<-ggplot(df.cts5, aes(x=gg_afectados, fill=nodal_status_Kmeans_k2, color=nodal_status_Kmeans_k2)) +
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+ph4<-ggplot(df.cts5, aes(x=gg_afectados, fill=nodal_status_hier_k3, color=nodal_status_hier_k3)) + 
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+grid.arrange(pk2, ph4, ncol=2)
+```
+
+
+
+- **gg_extraidos** 
+
+
+```{r, warning=FALSE, include=FALSE}
+df.colum<-as.data.frame(df.cts5$gg_extraidos)
+#hist(df.cts5$gg_extraidos, main="Ganglios extraidos")
+evaluation.silhouette.elbow(df.colum)
+```
+
+
+
+```{r, warning=FALSE}
+evaluation.cl_valid(df.colum, 7)
+```
+hierarchical con k=4, separar 0-1+los que dice hierarchical
+
+```{r}
+hierarchical.best.method(df.colum, clustering.types,4)
+```
+
+single
+
+```{r}
+df.colum$cl=make.cluster.isolated(df.colum, "hierarchical", 4, "average")
+table(df.colum$cl)
+
+df.cts5$gg_extraidos_hier_k4<-cut(df.cts5$gg_extraidos, breaks=c(-1,1,11,17,32))
+table(df.cts5$gg_extraidos_hier_k4)
+```
+
+
+```{r, include=FALSE}
+sum(is.na(df.cts5))
+df.cts5<-na.omit(df.cts5)
+```
+
+```{r, message=FALSE, warning=FALSE}
+g_extraidos<-ggplot(df.cts5, aes(x=gg_extraidos, fill=gg_extraidos_hier_k4, color=gg_extraidos_hier_k4)) +
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top")
+g_extraidos
+```
+
+
+- **ki67**
+
+
+```{r, warning=FALSE}
+df.colum<-as.data.frame(df.cts5$ki67)
+#hist(df.cts5$gg_extraidos, main="Ganglios extraidos")
+evaluation.silhouette.elbow(df.colum)
+evaluation.cl_valid(df.colum, 9)
+```
+
+7 hierarchical
+
+```{r}
+hierarchical.best.method(df.colum, clustering.types,7)
+```
+
+average
+
+```{r}
+df.colum$cl=make.cluster.isolated(df.colum, "hierarchical", 7, "average")
+table(df.colum$cl)
+
+df.cts5$ki67_hier_k7<-cut(df.cts5$ki67, breaks=c(0,11,20,31,40,49,56,63))
+table(df.cts5$ki67_hier_k7)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+g_ki67<-ggplot(df.cts5, aes(x=ki67, fill=ki67_hier_k7, color=ki67_hier_k7)) +
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top")
+g_ki67
+```
+
+```{r, echo=FALSE}
+#write.csv(df.cts5, file="C:\\Users\\nchiclana\\Google Drive\\TFG\\FEATURES\\datasets\\CTS5_clusers.csv")
+write.csv(df.cts5, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/CTS5_clusers.csv")
+```
+
+
+------------------------------------------------
+
+# TCGA 
+
+## Obtención datset
+
+```{r, message=FALSE}
+library(UCSCXenaTools)
+library(TCGAretriever) 
+library(dplyr)
+```
+
+```{r, message=FALSE, warning=FALSE}
+all_case_lists<-get_case_lists("brca_tcga")
+colnames(all_case_lists)
+
+brca_tcga<-get_clinical_data("brca_tcga_all")
+#str(brca_tcga)
+
+df.tcga<-brca_tcga[,names(brca_tcga) %in% c("AGE", "AJCC_PATHOLOGIC_TUMOR_STAGE", "AJCC_TUMOR_PATHOLOGIC_PT", "ER_STATUS_BY_IHC",  "ER_STATUS_BY_IHC", "IHC_HER2",  "LYMPH_NODE_EXAMINED_COUNT", "MENOPAUSE_STATUS", "OS_STATUS", "PR_STATUS_BY_IHC", "OS_MONTHS")]
+
+
+dim(df.tcga)
+str(df.tcga)
+```
+
+
+
+
+## Tratamiento
+
+Transformar tipos
+
+```{r}
+#Numeric
+df.tcga$AGE<-as.numeric(df.tcga$AGE)
+df.tcga$LYMPH_NODE_EXAMINED_COUNT<-as.numeric(df.tcga$LYMPH_NODE_EXAMINED_COUNT)
+df.tcga$OS_MONTHS<-as.numeric(df.tcga$OS_MONTHS)
+
+#Factor
+df.tcga$AJCC_PATHOLOGIC_TUMOR_STAGE<-as.factor(df.tcga$AJCC_PATHOLOGIC_TUMOR_STAGE)
+df.tcga$AJCC_TUMOR_PATHOLOGIC_PT<-as.factor(df.tcga$AJCC_TUMOR_PATHOLOGIC_PT)
+
+df.tcga$ER_STATUS_BY_IHC<-as.factor(df.tcga$ER_STATUS_BY_IHC)
+df.tcga$IHC_HER2<-as.factor(df.tcga$IHC_HER2)
+df.tcga$PR_STATUS_BY_IHC<-as.factor(df.tcga$PR_STATUS_BY_IHC)
+
+df.tcga$MENOPAUSE_STATUS<-as.factor(df.tcga$MENOPAUSE_STATUS)
+
+```
+
+Eliminar vacios
+
+```{r}
+df.tcga<-df.tcga[df.tcga$AJCC_PATHOLOGIC_TUMOR_STAGE!="",]
+df.tcga<-df.tcga[df.tcga$AJCC_PATHOLOGIC_TUMOR_STAGE!="X",]
+
+df.tcga<-df.tcga[df.tcga$AJCC_TUMOR_PATHOLOGIC_PT!="",]
+df.tcga<-df.tcga[df.tcga$AJCC_TUMOR_PATHOLOGIC_PT!="TX",]
+#df.tcga<-df.tcga[df.tcga$HISTORY_NEOADJUVANT_TRTYN!="",]
+df.tcga<-df.tcga[df.tcga$IHC_HER2!="",]
+df.tcga<-df.tcga[df.tcga$IHC_HER2!="Indeterminate",]
+df.tcga<-df.tcga[as.factor(df.tcga$IHC_HER2)!="Equivocal",]
+df.tcga<-df.tcga[df.tcga$PR_STATUS_BY_IHC!="",]
+df.tcga<-df.tcga[df.tcga$PR_STATUS_BY_IHC!="Indeterminate",]
+df.tcga<-df.tcga[df.tcga$ER_STATUS_BY_IHC!="",]
+df.tcga<-df.tcga[df.tcga$ER_STATUS_BY_IHC!="Indeterminate",]
+df.tcga<-df.tcga[df.tcga$MENOPAUSE_STATUS!="",]
+df.tcga<-df.tcga[df.tcga$MENOPAUSE_STATUS!="Indeterminate (neither Pre or Postmenopausal)",]
+df.tcga<-df.tcga[df.tcga$OS_MONTHS>0,]
+```
+
+
+Unificar nombres variables y niveles
+
+```{r}
+colnames(df.tcga)[which(names(df.tcga)=="AGE")] <- "edad"
+
+colnames(df.tcga)[which(names(df.tcga)=="IHC_HER2")] <- "her2_status"
+df.tcga$her2_status<-factor(df.tcga$her2_status, labels=c("her2_negative", "her2_positive"))
+colnames(df.tcga)[which(names(df.tcga)=="PR_STATUS_BY_IHC")] <- "rp_status"
+df.tcga$rp_status<-factor(df.tcga$rp_status, labels=c("rp_negative", "rp_positive"))
+colnames(df.tcga)[which(names(df.tcga)=="ER_STATUS_BY_IHC")] <- "re_status"
+df.tcga$re_status<-factor(df.tcga$re_status, labels=c("re_negative", "re_positive"))
+
+
+colnames(df.tcga)[which(names(df.tcga)=="AJCC_TUMOR_PATHOLOGIC_PT")] <- "estadio"
+df.tcga$estadio<-factor(df.tcga$estadio, labels=c("T1", "T1", "T1", "T2", "T2", "T3", "T4", "T4", "T4"))
+
+colnames(df.tcga)[which(names(df.tcga)=="AJCC_PATHOLOGIC_TUMOR_STAGE")] <- "tumor_stage"
+df.tcga$tumor_stage<-factor(df.tcga$tumor_stage, labels=c("I", "I", "I", "II", "II", "II", "III", "III", "III", "III", "IV"))
+
+colnames(df.tcga)[which(names(df.tcga)=="MENOPAUSE_STATUS")] <- "estado_menop"
+df.tcga$estado_menop<-factor(df.tcga$estado_menop,labels=c("Premenopausica","Postmenopausica","Premenopausica"))  #Peri-> Pre
+
+colnames(df.tcga)[which(names(df.tcga)=="LYMPH_NODE_EXAMINED_COUNT")] <- "gg_afectados"
+
+df.tcga$gg_afectados[is.na(df.tcga$gg_afectados)]=0
+
+
+df.tcga$seguimiento_years<-df.tcga$OS_MONTHS/12
+df.tcga<-as.data.frame(df.tcga[, !names(df.tcga) %in% c("OS_MONTHS")])
+
+
+evento<-vector()
+for (r in 1:nrow(df.tcga)) {
+  status=df.tcga$OS_STATUS[r]
+  if(status=="LIVING")  evento[r]=0
+  else if(status=="DECEASED")  evento[r]=1
+
+}
+df.tcga$evento<-evento
+df.tcga<-as.data.frame(df.tcga[, !names(df.tcga) %in% c("OS_STATUS")])
+
+```
+
+Creación variables
+
+```{r}
+#Hormone receptor
+hormone_receptor<-vector()
+for (r in 1:nrow(df.tcga)) {
+  re=df.tcga$re_status[r]
+  rp=df.tcga$rp_status[r]
+  her2=df.tcga$her2_status[r] 
+  
+  if(re=="re_positive" && rp=="rp_negative")  hormone_receptor[r]="Estrogen-receptor-positive"
+  else if(re=="re_positive" && rp=="rp_positive") hormone_receptor[r]="Estrogen-and-Progesterone-receptor-positive"
+  else if(her2=="her2_negative" && re=="re_negative" && rp=="rp_negative")  hormone_receptor[r]="Triple Negative"
+  else hormone_receptor[r]="Other"
+}
+df.tcga$hormone_receptor<-as.factor(hormone_receptor)
+
+
+#nodal status standard y paper
+max_gg=max(df.tcga$gg_afectados)
+nodal_status<-vector()
+for (r in 1:nrow(df.tcga)) {
+  gg=df.tcga$gg_afectados[r]
+  if(gg==0) nodal_status[r]="Negative"
+  else if(gg==1) nodal_status[r]="1"
+  else if (gg>=2 && gg<=3) nodal_status[r]="2-3"
+  else if (gg>=4 && gg<=9) nodal_status[r]="4-9"
+  else if (gg>9) nodal_status[r]="9+"
+ 
+}
+df.tcga$nodal_status_standard_paper_score<-as.factor(nodal_status)
+
+#Age standard
+age_standard<-vector() 
+for (r in 1:nrow(df.tcga)) {
+  age=df.tcga$edad[r]
+  if(age<=50)  age_standard[r]="<=50"
+  else age_standard[r]=">50"
+}
+df.tcga$age_standard<-as.factor(age_standard)
+
+#Subtipo bc 
+
+vectorluminals <-list()
+for(i in 1:nrow(df.tcga)) {
+  hormone_receptor_positive=(df.tcga[i,]$re_status=="re_positive" || df.tcga[i,]$rp_status=="rp_positive")
+  hormone_receptor_negative=(df.tcga[i,]$re_status=="re_negative" && df.tcga[i,]$rp_status=="rp_negative")
+  if(hormone_receptor_positive && df.tcga[i,]$her2_status=="her2_negative") vectorluminals[i]<-"LuminalA"
+  else if(hormone_receptor_positive)  vectorluminals[i]<-"LuminalB" 
+  else if(df.tcga[i,]$re_status=="re_negative" && df.tcga[i,]$rp_status=="rp_negative" && df.tcga[i,]$her2_status=="her2_negative") vectorluminals[i]<-"TN"
+  else if(hormone_receptor_negative && df.tcga[i,]$her2_status=="her2_positive") vectorluminals[i]<-"HER2-enriched"
+  else if(hormone_receptor_positive && df.tcga[i,]$her2_status=="her2_negative") vectorluminals[i]<-"Normal-line"
+}
+df.tcga$subtipo_bc<-as.factor(unlist(vectorluminals))
+```
+
+
+## Summary
+
+
+```{r}
+str(df.tcga)
+summary(df.tcga)
+```
+
+### Distribución numéricas
+
+
+```{r}
+par(mfrow=c(2,2))
+
+hist(df.tcga$edad, main="Histograma Edad pacientes", xlab="Edad")
+hist(df.tcga$gg_afectados, main="Histograma Gánglios afectados", xlab="Número ganglios afectados")
+hist(df.tcga$seguimiento_years, main="Histograma tiempo seguimiento pacientes", xlab="Años")
+
+```
+
+
+```{r}
+par(mfrow=c(2,2))
+boxplot(df.tcga$edad, main="Boxplot Edad")
+boxplot(df.tcga$gg_afectados, main="Boxplot Gánglios afectados")
+boxplot(df.tcga$seguimiento_years, main="Boxplot Años seguimiento pacientes")
+```
+
+
+```{r, eval=FALSE}
+#DISTRIBUCIONES CATEGÓRICAS
+
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+
+#colnames(df.cts5)[which(names(df.cts5)=="subtipo_bc_Nuria-ki67")] <- "subtipo_bc_Nuria_ki67"
+levels(df.tcga$hormone_receptor)=c("E+P+ ", "E+", "other", "TN")
+
+#CATEGÓRICAS
+g_menop<-ggplot(df.tcga, aes(estado_menop)) + geom_bar(aes(fill=estado_menop)) +theme_minimal() + theme(legend.position = "none") + geom_bar(fill="gray33")+ labs(x = "Estado menopausico")
+g_etapa<-ggplot(df.tcga, aes(tumor_stage)) + geom_bar(aes(fill=tumor_stage)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Etapa tumoral")
+g_estadio<-ggplot(df.tcga, aes(estadio)) + geom_bar(aes(fill=estadio)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Estadio tumoral")
+g_receptor<-ggplot(df.tcga, aes(hormone_receptor)) + geom_bar(aes(fill=hormone_receptor)) +theme_minimal() + theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Receptor hormonal")
+g_subtipo<-ggplot(df.tcga, aes(subtipo_bc)) + geom_bar(aes(fill=subtipo_bc)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "Subtipo de cancer")
+
+
+freq_evento <- table(df.tcga$evento)
+pct<-round(freq_evento/nrow(df.tcga)*100)
+lbls <- paste(names(freq_evento), pct)
+lbls <- paste(lbls, "%", sep="")
+pie(freq_evento, labels = lbls, main="Diagrama de tarta evento", col=c("lightblue1", "firebrick1"))
+```
+
+### Clusters
+
+**DISPERSIÓN**
+
+```{r}
+par(mfrow=c(1,2))
+plot(df.tcga$edad, main="Distribución Edad") #kmeans obviously
+plot(df.tcga$gg_afectados, main="Distribución Gánglios afectados")
+```
+
+- **Edad**
+
+```{r}
+df.colum<-as.data.frame(df.tcga$edad)
+evaluation.silhouette.elbow(df.colum)
+
+```
+```{r}
+evaluation.cl_valid(df.colum, 7)
+```
+
+kmeans 4
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 4, "-")
+df.colum$cl=kmeans.fit$cluster
+#table(df.colum[,1][df.colum$cl==1])
+df.tcga$edad_Kmeans_k4<-cut(df.tcga$edad, breaks=c(0,45,57,70,100))
+table(df.tcga$edad_Kmeans_k4)
+```
+
+kmeans 3
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 3, "-")
+df.colum$cl=kmeans.fit$cluster
+#table(df.colum[,1][df.colum$cl==1])
+df.tcga$edad_Kmeans_k3<-cut(df.tcga$edad, breaks=c(0,54,70,100))
+table(df.tcga$edad_Kmeans_k3)
+```
+
+```{r, message=FALSE}
+pk3<-ggplot(df.tcga, aes(x=edad, fill=edad_Kmeans_k3, color=edad_Kmeans_k3)) +
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+pk4<-ggplot(df.tcga, aes(x=edad, fill=edad_Kmeans_k4, color=edad_Kmeans_k4)) + 
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+grid.arrange(pk3, pk4, ncol=2)
+
+```
+
+- **gg_afectados (Nodal status)** 
+
+```{r}
+df.colum<-as.data.frame(df.tcga$gg_afectados)
+evaluation.silhouette.elbow(df.colum)
+```
+
+```{r, warning=FALSE}
+evaluation.cl_valid(df.colum, 7)
+```
+
+kmeans 4
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 4, "-")
+df.colum$cl=kmeans.fit$cluster
+#table(df.colum[,1][df.colum$cl==1])
+df.tcga$nodal_status_k4<-cut(df.tcga$gg_afectados, breaks=c(-1,5,12,21,44))
+table(df.tcga$nodal_status_k4)
+```
+
+
+negative + k3
+
+```{r}
+kmeans.fit<-make.cluster.isolated(df.colum, "kmeans", 3, "-")
+df.colum$cl=kmeans.fit$cluster
+#table(df.colum[,1][df.colum$cl==1])
+df.tcga$nodal_status_k3_neg<-cut(df.tcga$gg_afectados, breaks=c(-1,0,8,19,44))
+table(df.tcga$nodal_status_k3_neg)
+```
+
+```{r, message=FALSE}
+pk3<-ggplot(df.tcga, aes(x=gg_afectados, fill=nodal_status_k3_neg, color=nodal_status_k3_neg)) +
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+pk4<-ggplot(df.tcga, aes(x=gg_afectados, fill=nodal_status_k4, color=nodal_status_k4)) + 
+  geom_histogram(position="identity", alpha=0.8) +theme(legend.position="top") 
+
+grid.arrange(pk3, pk4, ncol=2)
+
+```
+
+
+```{r, echo=FALSE}
+#write.csv(df.cts5, file="C:\\Users\\nchiclana\\Google Drive\\TFG\\FEATURES\\datasets\\CTS5_clusers.csv")
+write.csv(df.tcga, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/TCGA_clusers.csv")
+```

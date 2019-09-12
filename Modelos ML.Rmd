@@ -1,0 +1,1385 @@
+---
+title: "Modelos ML"
+author: "Naira María Chiclana García 44717497T"
+date: "Agosto 2019"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+
+
+```{r, message=FALSE}
+library(FSelector)
+library(dplyr)
+library(KMsurv)
+library(survMisc)
+library(survminer)
+library(mlr)
+library(caret)
+library(gridExtra)
+
+#For survival learners
+library(party)
+library(CoxBoost)
+library(glmnet)
+library(mboost)
+
+#For classification learners
+library(bartMachine)
+library(stats)
+library(C50)
+
+'%ni%' <- Negate('%in%')
+```
+ 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+df.cts5<-read.csv("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/choosen_cts5.csv", dec=",", header=T)
+df.cts5<-as.data.frame(df.cts5[, !names(df.cts5) %in% c("X")])
+df.cts5$seguimiento_years<-as.numeric(as.character(df.cts5$seguimiento_years))
+
+df.tcga<-read.csv("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/choosen_tcga.csv", dec=",", header=T)
+df.tcga<-as.data.frame(df.tcga[, !names(df.tcga) %in% c("X")])
+df.tcga$seguimiento_years<-as.numeric(as.character(df.tcga$seguimiento_years))
+```
+
+```{r}
+str(df.cts5)
+```
+
+```{r}
+str(df.tcga)
+```
+
+
+# Data Replication
+
+
+```{r}
+df.cts5$seguimiento_years<-round(df.cts5$seguimiento_years*12)
+colnames(df.cts5)[which(names(df.cts5)=="seguimiento_years")] <- "seguimiento_months"
+df.cts5 <-df.cts5[order(df.cts5$seguimiento_months),] 
+
+df.tcga$seguimiento_years<-round(df.tcga$seguimiento_years*12)
+colnames(df.tcga)[which(names(df.tcga)=="seguimiento_years")] <- "seguimiento_months"
+df.tcga <-df.tcga[order(df.tcga$seguimiento_months),] 
+```
+
+
+
+```{r,eval=FALSE, warning=FALSE}
+replicate.df<-function(df) {
+  
+  last.time<-max(df$seguimiento_months)
+  replicated.df<-data.frame()
+  stp=ifelse(colnames(df)==colnames(df.cts5), 4, 3)[1]
+
+  
+  for (patient in 1:nrow(df)) {
+    cols.to.save<-colnames(df)[colnames(df) %ni% c("evento", "seguimiento_months")]
+    cols<-sapply(cols.to.save, function(c) as.character(df[patient,c]))
+    status<-df$evento[patient]
+    time<-df$seguimiento_months[patient]
+    start_time=ifelse(time>10,time-10, 0)
+    step_1=(last.time-time)/10
+  
+   #alive before time
+    for(m in seq(start_time,time,by=stp)) {
+      new.row<-c(paste(cols, sep=","), 0,m)
+      replicated.df<-rbind(replicated.df, as.data.frame(t(new.row)))
+    } 
+
+    #if was dead, still dead after time
+    if(status==1) {
+      for(m in seq(time,last.time,by=step_1)) {
+        new.row<-c(paste(cols, sep=","), 1,m)
+        replicated.df<-rbind(replicated.df, as.data.frame(t(new.row)))
+      }
+    }
+  }
+  names(replicated.df)<-c(cols.to.save, "evento", "seguimiento_months")
+  return(replicated.df)
+  
+}
+
+replicated.cts5<-replicate.df(df.cts5)
+replicated.cts5$seguimiento_months<-as.numeric(as.character(replicated.cts5$seguimiento_months))
+replicated.tcga<-replicate.df(df.tcga)
+replicated.tcga$seguimiento_months<-as.numeric(as.character(replicated.tcga$seguimiento_months))
+```
+
+```{r, eval=FALSE, echo=FALSE}
+save(replicated.cts5, replicated.tcga,  file="/Users/nairachiclana/Google Drive/TFG/FEATURES/rdata/replicated_df.RData")
+```
+
+
+```{r, echo=FALSE}
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/rdata/replicated_df.RData")
+```
+
+
+```{r}
+dim(df.cts5)
+dim(replicated.cts5)
+
+dim(df.tcga)
+dim(replicated.tcga)
+```
+
+
+
+
+
+### Proporciones 
+
+Se mantienen reduciendo el sesgo del evento
+
+```{r}
+print.distributions<-function(df, replicated.df) {
+  cols<-colnames(df)[colnames(df) %ni% c("seguimiento_months")]
+  for (col in cols) {
+    cat(col, "Original \n")
+    print(prop.table(table(df[,col])))
+    cat(col,"Replicado \n")
+    print(prop.table(table(replicated.df[,col])))
+    cat("\n")
+  }
+}
+```
+
+- **CTS5**:
+
+
+```{r, warning=FALSE}
+print.distributions(df.cts5, replicated.cts5)
+g<-ggplot(df.cts5, aes(seguimiento_months)) + geom_bar(aes(fill=evento)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "meses", y="count evento") 
+g_r<-ggplot(replicated.cts5, aes(seguimiento_months)) + geom_bar(aes(fill=evento)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "meses", y="count evento") + coord_cartesian(xlim =c(0, 300), ylim = c(0, 47))
+grid.arrange(g,g_r, ncol=2, nrow=1) 
+```
+
+
+```{r}
+g_menop<-ggplot(df.cts5, aes(estado_menop)) + geom_bar(aes(fill=estado_menop)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_menop<-ggplot(replicated.cts5, aes(estado_menop)) + geom_bar(aes(fill=estado_menop)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_menop,g_r_menop, ncol=2, nrow=1)
+
+g_riesgo<-ggplot(df.cts5, aes(riesgo)) + geom_bar(aes(fill=riesgo)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_riesgo<-ggplot(replicated.cts5, aes(riesgo)) + geom_bar(aes(fill=riesgo)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_riesgo,g_r_riesgo, ncol=2, nrow=1)
+
+g_ts<-ggplot(df.cts5, aes(tumor_size_group_paper_score)) + geom_bar(aes(fill=tumor_size_group_paper_score)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_ts<-ggplot(replicated.cts5, aes(tumor_size_group_paper_score)) + geom_bar(aes(fill=tumor_size_group_paper_score)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_ts,g_r_ts, ncol=2, nrow=1)
+
+g_ns<-ggplot(df.cts5, aes(nodal_status_hier_k3)) + geom_bar(aes(fill=nodal_status_hier_k3)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_ns<-ggplot(replicated.cts5, aes(nodal_status_hier_k3)) + geom_bar(aes(fill=nodal_status_hier_k3)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_ns,g_r_ns, ncol=2, nrow=1)
+
+g_edad<-ggplot(df.cts5, aes(edad_Kmeans_k4)) + geom_bar(aes(fill=edad_Kmeans_k4)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_edad<-ggplot(replicated.cts5, aes(edad_Kmeans_k4)) + geom_bar(aes(fill=edad_Kmeans_k4)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_edad,g_r_edad, ncol=2, nrow=1)
+```
+
+
+- **TCGA**:
+
+```{r}
+print.distributions(df.tcga, replicated.tcga)
+
+g<-ggplot(df.tcga, aes(seguimiento_months)) + geom_bar(aes(fill=evento)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "meses", y="count evento") 
+g_r<-ggplot(replicated.tcga, aes(seguimiento_months)) + geom_bar(aes(fill=evento)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "meses", y="count evento") + coord_cartesian(xlim =c(0, 157))
+grid.arrange(g,g_r, ncol=2, nrow=1)
+```
+
+
+```{r}
+
+
+g_menop<-ggplot(df.tcga, aes(estado_menop)) + geom_bar(aes(fill=estado_menop)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_menop<-ggplot(replicated.tcga, aes(estado_menop)) + geom_bar(aes(fill=estado_menop)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_menop,g_r_menop, ncol=2, nrow=1)
+
+
+g_ts<-ggplot(df.tcga, aes(tumor_stage)) + geom_bar(aes(fill=tumor_stage)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_ts<-ggplot(replicated.tcga, aes(tumor_stage)) + geom_bar(aes(fill=tumor_stage)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_ts,g_r_ts, ncol=2, nrow=1)
+
+g_ns<-ggplot(df.tcga, aes(nodal_status_k3_neg)) + geom_bar(aes(fill=nodal_status_k3_neg)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_ns<-ggplot(replicated.tcga, aes(nodal_status_k3_neg)) + geom_bar(aes(fill=nodal_status_k3_neg)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_ns,g_r_ns, ncol=2, nrow=1)
+
+g_edad<-ggplot(df.tcga, aes(edad_Kmeans_k3)) + geom_bar(aes(fill=edad_Kmeans_k3)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+g_r_edad<-ggplot(replicated.tcga, aes(edad_Kmeans_k3)) + geom_bar(aes(fill=edad_Kmeans_k3)) +theme_minimal()+ theme(legend.position = "none")+ geom_bar(fill="gray33")+ labs(x = "evento", y="count") 
+grid.arrange(g_edad,g_r_edad, ncol=2, nrow=1)
+```
+
+
+## Replicación grande
+
+
+```{r,eval=FALSE, warning=FALSE}
+
+'%ni%' <- Negate('%in%')
+
+replicate_big.df<-function(df) {
+  
+  last.time<-max(df$seguimiento_months)
+  replicated.df<-data.frame()
+  stp=ifelse(colnames(df)==colnames(df.cts5), 1, 1)[1]
+
+  
+  for (patient in 1:nrow(df)) {
+    cols.to.save<-colnames(df)[colnames(df) %ni% c("evento", "seguimiento_months")]
+    cols<-sapply(cols.to.save, function(c) as.character(df[patient,c]))
+    status<-df$evento[patient]
+    time<-df$seguimiento_months[patient]
+    start_time=ifelse(time>20,time-20, 0)
+    step_1=(last.time-time)/20
+  
+   #alive before time
+    for(m in seq(start_time,time,by=stp)) {
+      new.row<-c(paste(cols, sep=","), 0,m)
+      replicated.df<-rbind(replicated.df, as.data.frame(t(new.row)))
+    } 
+
+    #if was dead, still dead after time
+    if(status==1) {
+      for(m in seq(time,last.time,by=step_1)) {
+        new.row<-c(paste(cols, sep=","), 1,m)
+        replicated.df<-rbind(replicated.df, as.data.frame(t(new.row)))
+      }
+    }
+  }
+  names(replicated.df)<-c(cols.to.save, "evento", "seguimiento_months")
+  return(replicated.df)
+  
+}
+
+replicated_big.cts5<-replicate_big.df(df.cts5)
+replicated_big.cts5$seguimiento_months<-as.numeric(as.character(replicated_big.cts5$seguimiento_months))
+replicated_big.tcga<-replicate_big.df(df.tcga)
+replicated_big.tcga$seguimiento_months<-as.numeric(as.character(replicated_big.tcga$seguimiento_months))
+
+save(replicated_big.cts5, replicated_big.tcga,  file="/Users/nairachiclana/Google Drive/TFG/FEATURES/rdata/replicated_big_df.RData")
+
+```
+
+```{r, echo=FALSE}
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/rdata/replicated_big_df.RData")
+```
+
+Volver a poner años en meses
+
+```{r}
+months_to_years<-function(df) {
+  if("seguimiento_years" %ni% colnames(df)) {
+    df$seguimiento_years<-round(df$seguimiento_months/12)
+    df<-df[, !names(df) %in% c("seguimiento_months")]
+    df <-df[order(df$seguimiento_years),] 
+  }
+  return(df)
+}
+
+df.cts5<-months_to_years(df.cts5)
+replicated.cts5<-months_to_years(replicated.cts5)
+replicated_big.cts5<-months_to_years(replicated_big.cts5)
+
+df.tcga<-months_to_years(df.tcga)
+replicated.tcga<-months_to_years(replicated.tcga)
+replicated_big.tcga<-months_to_years(replicated_big.tcga)
+```
+
+
+```{r}
+dim(df.cts5)
+dim(replicated_big.cts5)
+
+dim(df.tcga)
+dim(replicated_big.tcga)
+```
+
+
+- **CTS5**:
+
+```{r,eval=FALSE}
+print.distributions(df.cts5, replicated_big.cts5)
+```
+
+```{r}
+par(mfrow=c(1,3))
+hist(df.cts5$seguimiento_years)
+hist(replicated.cts5$seguimiento_years)
+hist(replicated_big.cts5$seguimiento_years)
+```
+
+- **TCGA**:
+
+```{r,eval=FALSE}
+print.distributions(df.tcga, replicated_big.tcga)
+```
+
+```{r}
+par(mfrow=c(1,3))
+hist(df.tcga$seguimiento_years)
+hist(replicated.tcga$seguimiento_years)
+hist(replicated_big.tcga$seguimiento_years)
+```
+
+## Tamaños finales dataset
+
+**Número de casos (filas)**
+
+|                     |  Original        | Replicación normal  | Replicación grande |
+|----------------------- |-------------|------------------|------------|
+|CTS5 |     818 |    3422   |  17706     |   
+|TCGA |   648       | 3137      |   11689     | 
+
+
+
+**Proporción eventos (%0-%1)**
+
+
+
+|      |  Original        | Replicación normal  | Replicación grande |
+|------|----------------- |---------------------|------------------|
+|CTS5 |    89%-11%       |  72%-28%           |      90%-10%    |   
+|TCGA |   90%-10%       | 78%-22%              |   90%-10%    | 
+
+
+```{r}
+replicated.cts5$evento<-as.numeric(as.character(replicated.cts5$evento))
+replicated.tcga$evento<-as.numeric(as.character(replicated.tcga$evento))
+```
+
+```{r, echo=FALSE}
+write.csv(replicated.cts5, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/replicated_cts5.csv")
+write.csv(replicated.tcga, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/replicated_tcga.csv")
+```
+
+
+
+-----
+
+
+# mlr- Performance measures  survival y  clasificación
+
+### Conjuntos train y test (80%-20%)
+
+- CTS5:
+
+```{r}
+indices_train<-createDataPartition(replicated.cts5$evento, p = 0.8)[[1]]
+cts5_train<-replicated.cts5[indices_train,]
+cts5_test<-replicated.cts5[-indices_train,]
+
+cts5_train$evento<-as.numeric(as.character(cts5_train$evento))
+cts5_test$evento<-as.numeric(as.character(cts5_test$evento))
+```
+
+
+- TCGA:
+
+```{r}
+indices_train<-createDataPartition(replicated.tcga$evento, p = 0.8)[[1]]
+tcga_train<-replicated.tcga[indices_train,]
+tcga_test<-replicated.tcga[-indices_train,]
+
+tcga_train$evento<-as.numeric(as.character(tcga_train$evento))
+tcga_test$evento<-as.numeric(as.character(tcga_test$evento))
+```
+
+
+
+## Survival 
+
+
+
+### Tasks Survival
+
+Learning tasks encapsulate the data set and further relevant information about a machine learning problem, for example the name of the target variable for supervised problems.
+
+
+```{r, eval=FALSE, echo=FALSE}
+getTaskType(cts5_task)
+getTaskTargetNames(cts5_task)
+str(getTaskData(cts5_task)) #data set in surv.task
+head(getTaskTargets(cts5_task))
+
+removeConstantFeatures(cts5_task)
+```
+
+- CTS5 
+
+```{r}
+cts5_task<-makeSurvTask(data=data.frame(replicated.cts5),target=c("seguimiento_years","evento"))
+cts5_train_task<-makeSurvTask(data=data.frame(tcga_train),target=c("seguimiento_years","evento"))
+cts5_test_task<-makeSurvTask(data=data.frame(tcga_test),target=c("seguimiento_years", "evento"))
+```
+
+- TCGA
+
+```{r}
+tcga_task<-makeSurvTask(data=data.frame(replicated.tcga),target=c("seguimiento_years","evento"))
+tcga_train_task<-makeSurvTask(data=data.frame(cts5_train),target=c("seguimiento_years","evento"))
+tcga_test_task<-makeSurvTask(data=data.frame(cts5_test),target=c("seguimiento_years", "evento"))
+```
+
+
+### Learners survival 
+
+A learner in mlr is generated by calling `makeLearner()`. In the constructor you need to specify which learning method you want to use. Moreover, you can:
+
+- first parameter: which algorithm to use `surv.<R_method_name>` for survival analysis
+- `predict type`: $“response”$ (= some sort of orderable risk) or $“prob”$ (= time dependent probabilities).
+
+
+
+```{r, warning=FALSE}
+surv_lrns=listLearners("surv") 
+surv_lrns[c("class", "package", "prob")]
+```
+
+Occasionally, factor features may cause problems when fewer levels are present in the test data set than in the training data. By setting `fix.factors.prediction = TRUE` these are avoided by adding a factor level for missing data in the test data set.
+
+`makeLearner()` contains the properties of the method, e.g., which types of features it can handle, what kind of output is possible during prediction, and whether multi-class problems, observations weights or missing values are supported.
+
+
+```{r}
+learner_cox<-makeLearner("surv.coxph", fix.factors.prediction=TRUE)
+learner_cox_coxboost<-makeLearner("surv.CoxBoost", fix.factors.prediction=TRUE)
+learner_cox_cvboost<-makeLearner("surv.cv.CoxBoost", fix.factors.prediction=TRUE)
+learner_cox_glm<-makeLearner("surv.cvglmnet", fix.factors.prediction=TRUE)
+```
+
+
+### Performance measures survival with resampling 
+
+
+- `resample()`: evaluates a Learner `makeLearner()` on a given machine learning `Task()` using the selected resampling strategy `makeResampleDesc()`.
+
+
+Resampling strategys:
+
+- Cross-validation ("CV"),
+- Leave-one-out cross-validation ("LOO"),
+- Repeated cross-validation ("RepCV"),
+- Out-of-bag bootstrap and other variants like b632 ("Bootstrap"),
+- Subsampling, also called Monte-Carlo cross-validation ("Subsample"),
+- Holdout (training/test) ("Holdout").
+
+- CV: *Generally, for K-fold cross-validation the data set D is partitioned into K subsets of (approximately) equal size. In the b-th of the K iterations, the b-th subset is used for testing, while the union of the remaining parts forms the training set.*
+
+- Estratificar: misma proporción de clases en todas las variables. *This is particularly useful in the case of imbalanced classes and small data sets. Otherwise, it may happen that observations of less frequent classes are missing in some of the training sets which can decrease the performance of the learner, or lead to model crashes. In order to conduct stratified resampling, set* `stratify = TRUE` in `makeResampleDesc().`
+
+
+**C index**: *is a measure of goodness of fit for binary outcomes in a logistic regression model. In clinical studies, the C-statistic gives the probability a randomly selected patient who experienced an event had a higher risk score than a patient who had not experienced the event. It is equal to the area under the Receiver Operating Characteristic (ROC) curve and ranges from 0.5 to 1. * https://www.statisticshowto.datasciencecentral.com/c-statistic/ 
+
+- A value below 0.5 indicates a very poor model.
+- A value of 0.5 means that the model is no better than predicting an outcome than random chance. -> CASE
+- Values over 0.7 indicate a good model.
+- Values over 0.8 indicate a strong model.
+- A value of 1 means that the model perfectly predicts those group members who will experience a certain outcome and those - who will not.
+
+
+```{r}
+rdesc<-makeResampleDesc("CV", iters=5, stratify=TRUE)
+```
+
+
+- CTS5 
+
+```{r, warning=FALSE, eval=FALSE}
+
+start_cox<-Sys.time()
+res_cox<-resample(learner=learner_cox, task=cts5_task, resampling=rdesc)
+final_cox<-Sys.time()
+res_cox$aggr #cindex=0.57
+final_cox-start_cox #1 sec
+  #preds<-getPredictionResponse(res_cox$pred)
+  #hist(preds) [-1,1]
+  
+start_cox_coxboost<-Sys.time()
+res_cox_coxboost<-resample(learner=learner_cox_coxboost, task=cts5_task, resampling=rdesc)
+end_cox_coxboost<-Sys.time()
+res_cox_coxboost$aggr 
+end_cox_coxboost-start_cox_coxboost  
+
+start_cox_cvboost<-Sys.time()
+res_cox_cvboost<-resample(learner=learner_cox_cvboost, task=cts5_task, resampling=rdesc)
+final_cox_cvboost<-Sys.time()
+res_cox_cvboost$aggr 
+final_cox_cvboost-start_cox_cvboost 
+
+start_cox_glm<-Sys.time()
+res_cox_glm<-resample(learner=learner_cox_glm, task=cts5_task, resampling=rdesc)
+final_cox_glm<-Sys.time()
+res_cox_glm$aggr
+final_cox_glm-start_cox_glm  
+
+
+#getPredictionResponse(res$pred)
+#performance(res$pred, acc)
+#res$aggr #mean performance measure in test
+```
+
+
+|          | C-Index  | Execution time | 
+|----------|----------|----------------|
+|coxph  |   0.57 | 1 sec| 
+|CoxBoost   |  0.58   | 1.8 min | 
+|cv.CoxBoost  |  0.58    |8.6 min| 
+|cv.glmnet    |  0.5   |6 secs| 
+
+
+
+- TCGA
+
+```{r, warning=FALSE, eval=FALSE}
+
+start_cox<-Sys.time()
+res_cox<-resample(learner=learner_cox, task=tcga_task, resampling=rdesc)
+final_cox<-Sys.time()
+res_cox$aggr 
+final_cox-start_cox 
+
+start_cox_coxboost<-Sys.time()
+res_cox_coxboost<-resample(learner=learner_cox_coxboost, task=tcga_task, resampling=rdesc)
+end_cox_coxboost<-Sys.time()
+res_cox_coxboost$aggr
+end_cox_coxboost-start_cox_coxboost  
+
+start_cox_cvboost<-Sys.time()
+res_cox_cvboost<-resample(learner=learner_cox_cvboost, task=tcga_task, resampling=rdesc)
+final_cox_cvboost<-Sys.time()
+res_cox_cvboost$aggr 
+final_cox_cvboost-start_cox_cvboost 
+
+start_cox_glm<-Sys.time()
+res_cox_glm<-resample(learner=learner_cox_gamboost, task=tcga_task, resampling=rdesc)
+final_cox_glm<-Sys.time()
+res_cox_glm$aggr
+final_cox_glm-start_cox_glm 
+```
+
+|          | C-Index  | Execution time | 
+|----------|----------|----------------|
+|coxph  |   0.68 | 0,2 secs | 
+|CoxBoost   |  0.69   | 26 secs | 
+|cv.CoxBoost  |  0.7    |7.2 min | 
+|cv.glmnet    |  0.62  |4 secs| 
+
+
+
+
+
+## Classification
+
+Estos modelos para cada registro calculan la probabilidad de cada nivel de la variable predictora (0 y 1 de evento) y devuelve el más probable. También podemos acceder a estas probabilidades exactas, donde la porbabilidad de 0 sería la probabilidad de sobrevivir y ordenado en el tiempo la predicción de la curva de supervivencia.
+
+
+### Tasks Clasificación
+
+- CTS5:
+
+```{r}
+#Evento as factor
+replicated.cts5_factor<-replicated.cts5
+replicated.cts5_factor$evento=as.factor(replicated.cts5_factor$evento)
+cts5_train_factor=cts5_train
+cts5_train_factor$evento=as.factor(cts5_train_factor$evento)
+cts5_test_factor=cts5_test
+cts5_test_factor$evento=as.factor(cts5_test_factor$evento)
+```
+
+```{r}
+cts5_task_classif<-makeClassifTask(data=data.frame(replicated.cts5_factor), target="evento", positive=0)
+cts5_train_task_classif<-makeClassifTask(data=data.frame(cts5_train_factor), target="evento", positive=0)
+cts5_test_task_classif<-makeClassifTask(data=data.frame(cts5_test_factor), target="evento", positive=0)
+```
+
+- TCGA
+
+```{r}
+#Evento as factor
+replicated.tcga_factor<-replicated.tcga
+replicated.tcga_factor$evento=as.factor(replicated.tcga_factor$evento)
+tcga_train_factor=tcga_train
+tcga_train_factor$evento=as.factor(tcga_train_factor$evento)
+tcga_test_factor=tcga_test
+tcga_test_factor$evento=as.factor(tcga_test_factor$evento)
+```
+
+```{r, warning=FALSE}
+tcga_task_classif<-makeClassifTask(data=data.frame(replicated.tcga_factor), target="evento", positive=0)
+tcga_train_task_classif<-makeClassifTask(data=data.frame(tcga_train_factor), target="evento", positive=0)
+tcga_test_task_classif<-makeClassifTask(data=data.frame(tcga_test_factor), target="evento", positive=0)
+```
+
+
+
+### Learners classification
+
+```{r, warning=FALSE}
+prob_lrns=listLearners(properties="prob") 
+prob_lrns[c("class", "package")]
+```
+
+
+```{r}
+learner_adaboost<-makeLearner("classif.adaboostm1",  predict.type = "prob", fix.factors.prediction=TRUE)
+learner_bartmachine<-makeLearner("classif.bartMachine", predict.type = "prob", fix.factors.prediction=TRUE)
+learner_binomial<-makeLearner("classif.binomial", predict.type = "prob", fix.factors.prediction=TRUE)
+learner_boosting<-makeLearner("classif.boosting", predict.type = "prob", fix.factors.prediction=TRUE)
+```
+
+
+### Performance measures Clasificación with resampling
+
+- mmce:  *misclassification* Misclassification rate (%): The percentage of incorrectly classified instances are nothing, but the misclassification rate of the classifier and can be calculated as
+
+$mmce=\frac{FP+FN}{Total instances}$ ($acc=\frac{TP+TN}{Total instances}$) -¡
+
+Error refer to the number of individual that we know that bellow to a category that are classified by the method in a different category. Normally we do not try to model misclassification we try to minimize it, and the best method depend on the problem and data type you have in your problem, The best method will be the method that allow you to minimize the misclassification error. MENOR MEJOR
+
+
+
+```{r}
+rdesc<-makeResampleDesc("CV", iters=5, stratify=TRUE) #el mismo de antes
+```
+
+- CTS5
+
+```{r, eval=FALSE}
+resample(learner_adaboost, cts5_task_classif, rdesc, measures = list( mmce))
+resample(learner_bartmachine, cts5_task_classif, rdesc, measures = list( mmce))
+resample(learner_binomial, cts5_task_classif, rdesc, measures = list(mmce))
+```
+
+|          | acc test | mmce test |  execution time |
+|----------|----------|-----------|-----------------|
+|adaboostm1 |   0.83  |0.17       |  0.32 secs   |
+|bartMachine   |   0.88  |0.12   |1.3 min   |
+|binomial  |   0.85  |0.15      |  0.2 secs   |
+
+- TCGA
+
+```{r, eval=FALSE}
+resample(learner_adaboost, tcga_task_classif, rdesc, measures = list(mmce))
+resample(learner_bartmachine, tcga_task_classif, rdesc, measures = list(mmce))
+resample(learner_binomial, tcga_task_classif, rdesc, measures = list(mmce))
+```
+
+|          | acc test | mmce test |   execution time |
+|----------|----------|-----------|------------------|
+|adaboostm1 |   0.82  |0.14       |  0.7 secs   |
+|bartMachine   |   0.99  |0.1    | 62 secs   |
+|binomial  |   0.89  |0.11   | 0.3 secs   |
+
+
+----------------
+
+
+# h2o- Exploración modelos de clasificación 
+
+- DRF: Distributed random forest
+- XG BOOST: extreme gradient boosting
+- GBM: gradient boost machines
+
+- http://docs.h2o.ai/h2o/latest-stable/h2o-docs/automl.html
+
+- `leaderboard_frame`: This argument allows the user to specify a particular data frame to use to score and rank models on the leaderboard. This frame will not be used for anything besides leaderboard scoring. If a leaderboard frame is not specified by the user, then the leaderboard will use cross-validation metrics instead, or if cross-validation is turned off by setting nfolds = 0, then a leaderboard frame will be generated automatically from the training 
+
+
+
+```{r, message=FALSE}
+library(h2o)
+h2o.init()
+```
+
+```{r, results="hide"}
+# For binary classification, response should be a factor
+cts5_train_h2o=as.h2o(cts5_train_factor)
+cts5_test_h2o=as.h2o(cts5_test_factor)
+
+tcga_train_h2o=as.h2o(tcga_train_factor)
+tcga_test_h2o=as.h2o(tcga_test_factor)
+
+```
+
+```{r, eval=FALSE}
+# Identify predictors and response
+y<-"evento"
+x<-setdiff(names(cts5_train_factor), y)
+
+# Run AutoML for 20 base models (limited to 1 hour max runtime by default)
+# sttoping metric auto=logloss (mirar bieb) http://docs.h2o.ai/h2o/latest-stable/h2o-docs/automl.html
+
+#---------CTS5-------------
+
+aml_cts5 <- h2o.automl(x=x, y=y,
+                  training_frame=cts5_train_h2o,
+                  leaderboard_frame=cts5_test_h2o,
+                  max_runtime_secs=5000,
+                  max_models = 40,
+                  nfolds=5,
+                  balance_classes=F,
+                  stopping_metric="AUTO",
+                  sort_metric="AUTO", #(auc)
+                  keep_cross_validation_predictions = T,
+                  keep_cross_validation_models = T,
+                  exclude_algos="StackedEnsemble",
+                  seed = 1)
+
+
+aml_cts5_balanced <- h2o.automl(x=x, y=y,
+                  training_frame=cts5_train_h2o,
+                  leaderboard_frame=cts5_test_h2o,
+                  max_runtime_secs=5000,
+                  max_models = 40,
+                  nfolds=5,
+                  balance_classes=T,
+                  stopping_metric="AUTO",
+                  sort_metric="AUTO", #(auc)
+                  keep_cross_validation_predictions = T,
+                  keep_cross_validation_models = T,
+                  exclude_algos="StackedEnsemble",
+                  seed = 1)
+
+
+
+#---------TCGA-------------
+
+
+y<-"evento"
+x<-setdiff(names(tcga_train_factor), y)
+
+aml_tcga <- h2o.automl(x=x, y=y,
+                  training_frame=tcga_train_h2o,
+                  leaderboard_frame=tcga_test_h2o,
+                  max_runtime_secs=5000,
+                  max_models = 40,
+                  nfolds=5,
+                  balance_classes=F,
+                  stopping_metric="AUTO",
+                  sort_metric="AUTO", #(auc)
+                  keep_cross_validation_predictions = T,
+                  keep_cross_validation_models = T,
+                  exclude_algos="StackedEnsemble",
+                  seed = 1)
+
+aml_tcga_balanced <- h2o.automl(x=x, y=y,
+                  training_frame=tcga_train_h2o,
+                  leaderboard_frame=tcga_test_h2o,
+                  max_runtime_secs=5000,
+                  max_models = 40,
+                  nfolds=5,
+                  balance_classes=T,
+                  stopping_metric="AUTO",
+                  sort_metric="AUTO", #(auc)
+                  keep_cross_validation_predictions = T,
+                  keep_cross_validation_models = T,
+                  exclude_algos="StackedEnsemble",
+                  seed = 1)
+
+
+```
+
+
+Los valores en las tablas corresponden a la media de evaluación del conjunto test durante la validación cruzada.
+
+
+**CTS5 Sin balancear**
+
+
+```{r, eval=FALSE, echo=FALSE}
+path_h2o="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/"
+cts5_model_1_DL = h2o.getModel(as.data.frame(aml_cts5@leaderboard)['model_id'][1,])
+cts5_model_path_DL <- h2o.saveModel(object=cts5_model_1_DL, path=path_h2o, force=TRUE) 
+#load_cts5_model_DL<- h2o.loadModel(cts5_model_path_DL)
+
+cts5_model_5_GBM = h2o.getModel(as.data.frame(aml_cts5@leaderboard)['model_id'][5,]) 
+cts5_model_path_GBM <- h2o.saveModel(object=cts5_model_5_GBM, path=path_h2o, force=TRUE) 
+#load_cts5_model_GBM<- h2o.loadModel(cts5_model_path_GBM)
+
+cts5_model_6_XGBoost = h2o.getModel(as.data.frame(aml_cts5@leaderboard)['model_id'][6,])
+cts5_model_path_XGBoost <- h2o.saveModel(object=cts5_model_6_XGBoost, path=path_h2o, force=TRUE) 
+#load_cts5_model_XGBoost<- h2o.loadModel(cts5_model_path_XGBoost)
+
+
+cts5_model_8_DRF = h2o.getModel(as.data.frame(aml_cts5@leaderboard)['model_id'][8,])
+cts5_model_path_DRF <- h2o.saveModel(object=cts5_model_8_DRF, path=path_h2o, force=TRUE) 
+#load_cts5_model_DRF<- h2o.loadModel(cts5_model_path_DRF)
+
+
+save(cts5_model_path_DL, cts5_model_path_GBM, cts5_model_path_XGBoost, cts5_model_path_DRF, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_cts5.RData" )
+```
+
+
+
+
+|                         |  AUC    |   ACC     | mean per clas ACC  | MSE   | mean per class MSE | 
+|-------------------------|---------|-----------|--------------------|-------|--------------------|
+|DeepLearning [1]         |  0.974  |  0.926    |           0.911    | 0.059 |        0.089       | 
+|XGBoost [6]              |  0.964  |  0.915    |           0.888    | 0.065 |        0.112       | 
+|GBM [5]                  |  0.963  |  0.915    |           0.882    | 0.066 |        0.118       |
+|DRF [8]                  |  0.961  |  0.916    |           0.881    | 0.069 |        0.119       |
+
+
+
+**CTS5 Balanceado**
+
+```{r, eval=FALSE, echo=FALSE}
+
+path_h2o="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/"
+cts5_b_model_1_DL = h2o.getModel(as.data.frame(aml_cts5_balanced@leaderboard)['model_id'][1,])
+cts5_b_model_path_DL <- h2o.saveModel(object=cts5_b_model_1_DL, path=path_h2o, force=TRUE)
+cts5_b_model_path_DL="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/DeepLearning_grid_1_AutoML_20190821_185645_model_3"
+#load_b_cts5_model_DL<- h2o.loadModel(cts5_b_model_path_DL)
+
+cts5_b_model_5_GBM = h2o.getModel(as.data.frame(aml_cts5_balanced@leaderboard)['model_id'][5,])
+cts5_b_model_path_GBM <- h2o.saveModel(object=cts5_b_model_5_GBM, path=path_h2o, force=TRUE)
+cts5_b_model_path_GBM="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/GBM_3_AutoML_20190821_210003"
+#load_b_cts5_model_GBM<- h2o.loadModel(cts5_b_model_path_GBM)
+
+cts5_b_model_8_XGBoost = h2o.getModel(as.data.frame(aml_cts5_balanced@leaderboard)['model_id'][8,])
+cts5_b_model_path_XGBoost  <- h2o.saveModel(object=cts5_b_model_8_XGBoost, path=path_h2o, force=TRUE)
+cts5_b_model_path_XGBoost="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/XGBoost_grid_1_AutoML_20190822_114826_model_12"
+#load_b_cts5_model_XGBoost<- h2o.loadModel(cts5_b_model_path_XGBoost)
+
+
+cts5_b_model_11_DRF = h2o.getModel(as.data.frame(aml_cts5_balanced@leaderboard)['model_id'][11,])
+cts5_b_model_path_DRF  <- h2o.saveModel(object=cts5_b_model_11_DRF, path=path_h2o, force=TRUE) 
+cts5_b_model_path_DRF="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/DRF_1_AutoML_20190822_114826"
+#load_b_cts5_model_DRF<- h2o.loadModel(cts5_b_model_path_DRF)
+
+
+save(cts5_b_model_path_DL,cts5_b_model_path_GBM, cts5_b_model_path_XGBoost,cts5_b_model_path_DRF, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_b_cts5.RData")
+```
+
+
+
+|                         |  AUC    |   ACC    | mean per clas ACC  | MSE   | mean per class MSE | 
+|-------------------------|---------|----------|--------------------|-------|--------------------|
+|DL [1]                   |  0.974  |  0.931   |           0.917    | 0.055 |        0.082       |
+|XGBoost [8]              |  0.966  |  0.925   |           0.898    | 0.061 |        0.102       | 
+|DRF [11]                 |  0.965  |  0.922   |           0.902    | 0.067 |        0.098       |
+|GBM [5]                  |  0.965  |  0.921   |           0.889    | 0.063 |        0.111       | 
+
+
+
+
+**TCGA Sin balancear**
+
+```{r, eval=FALSE, echo=FALSE}
+
+path_h2o="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/"
+
+tcga_model_1_DL = h2o.getModel(as.data.frame(aml_tcga@leaderboard)['model_id'][1,])
+tcga_model_path_DL <- h2o.saveModel(object=tcga_model_1_DL, path=path_h2o, force=TRUE)
+#load_tcga_model_path_DL<- h2o.loadModel(tcga_model_path_DL)
+
+tcga_model_2_DRF = h2o.getModel(as.data.frame(aml_tcga@leaderboard)['model_id'][2,])
+tcga_model_path_DRF  <- h2o.saveModel(object=tcga_model_2_DRF, path=path_h2o, force=TRUE) 
+#load_tcga_model_DRF<- h2o.loadModel(tcga_model_path_DRF)
+
+tcga_model_4_GBM = h2o.getModel(as.data.frame(aml_tcga@leaderboard)['model_id'][4,])
+tcga_model_path_GBM <- h2o.saveModel(object=tcga_model_4_GBM, path=path_h2o, force=TRUE)
+#load_tcga_model_GBM<- h2o.loadModel(tcga_model_path_GBM)
+
+tcga_model_12_XGBoost = h2o.getModel(as.data.frame(aml_tcga@leaderboard)['model_id'][12,])
+tcga_model_path_XGBoost  <- h2o.saveModel(object=tcga_model_12_XGBoost, path=path_h2o, force=TRUE)
+#load_tcga_model_XGBoost<- h2o.loadModel(tcga_model_path_XGBoost)
+
+
+tcga_model_12_GLM = h2o.getModel(as.data.frame(aml_tcga@leaderboard)['model_id'][36,])
+tcga_model_path_GLM  <- h2o.saveModel(object=tcga_model_12_GLM, path=path_h2o, force=TRUE)
+#load_tcga_model_GLM<- h2o.loadModel(tcga_model_path_GLM)
+
+
+save(tcga_model_path_DL,tcga_model_path_DRF,tcga_model_path_GBM,tcga_model_path_XGBoost,tcga_model_path_GLM, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_tcga.RData")
+```
+
+
+
+|                          |  AUC    |   ACC    | mean per clas ACC  | MSE   | mean per class MSE | 
+|--------------------------|---------|----------|--------------------|-------|--------------------|
+|XGBoost [12]              |  0.962  |  0.929   |           0.897    | 0.055 |        0.102       | 
+|GBM [4]                   |  0.961  |  0.929   |           0.892    | 0.056 |        0.108       | 
+|DL [1]                    |  0.961  |  0.925   |           0.883    | 0.064 |        0.117       |  
+|DRF [2]                   |  0.959  |  0.926   |           0.882    | 0.061 |        0.118       |  
+|GLM [36]                  |  0.933  |  0.890   |           0.859    | 0.109 |        0.143       | 
+
+
+
+
+**TCGA Balanceado**
+
+```{r, eval=FALSE, echo=FALSE}
+
+path_h2o="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/"
+
+tcga_b_model_1_DL = h2o.getModel(as.data.frame(aml_tcga_balanced@leaderboard)['model_id'][1,])
+tcga_b_model_path_DL <- h2o.saveModel(object=tcga_b_model_1_DL, path=path_h2o, force=TRUE)
+#load_b_tcga_model_path_DL<- h2o.loadModel(tcga_b_model_path_DL)
+
+tcga_b_model_2_DRF = h2o.getModel(as.data.frame(aml_tcga_balanced@leaderboard)['model_id'][2,])
+tcga_b_model_path_DRF  <- h2o.saveModel(object=tcga_b_model_2_DRF, path=path_h2o, force=TRUE) 
+#load_tcga_b_model_DRF<- h2o.loadModel(tcga_b_model_path_DRF)
+
+tcga_b_model_5_GBM = h2o.getModel(as.data.frame(aml_tcga_balanced@leaderboard)['model_id'][5,])
+tcga_b_model_path_GBM <- h2o.saveModel(object=tcga_b_model_5_GBM, path=path_h2o, force=TRUE)
+#load_tcga_b_model_GBM<- h2o.loadModel(tcga_b_model_path_GBM)
+
+tcga_b_model_19_XGBoost = h2o.getModel(as.data.frame(aml_tcga_balanced@leaderboard)['model_id'][19,])
+tcga_b_model_path_XGBoost  <- h2o.saveModel(object=tcga_b_model_19_XGBoost, path=path_h2o, force=TRUE)
+#load_tcga_b_model_XGBoost<- h2o.loadModel(tcga_b_model_path_XGBoost)
+
+tcga_b_model_72_GLM = h2o.getModel(as.data.frame(aml_tcga_balanced@leaderboard)['model_id'][72,])
+tcga_b_model_path_GLM  <- h2o.saveModel(object=tcga_b_model_72_GLM, path=path_h2o, force=TRUE)
+#load_tcga_model_GLM<- h2o.loadModel(tcga_b_model_path_GLM)
+
+
+save(tcga_b_model_path_DL, tcga_b_model_path_DRF,tcga_b_model_path_GBM, tcga_b_model_path_XGBoost,tcga_b_model_path_GLM, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_tcga_b.RData")
+```
+
+
+|                         |  AUC    |   ACC    | mean per clas ACC  | MSE   | mean per class MSE | 
+|-------------------------|---------|----------|--------------------|-------|--------------------|
+|XGBoost [19]             |  0.961  |  0.929   |           0.897    | 0.056 |        0.108       |
+|GBM [5]                  |  0.962  |  0.929   |           0.892    | 0.056 |        0.108       | 
+|DL [1]                   |  0.961  |  0.925   |           0.882    | 0.064 |        0.117       | 
+|DRF [2]                  |  0.959  |  0.926   |           0.882    | 0.061 |        0.118       | 
+|GLM [72]                 |  0.933  |  0.890   |           0.859    | 0.109 |        0.143       | 
+
+
+
+
+```{r, echo=FALSE, eval=FALSE}
+#PRUEBA 
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_cts5.RData")
+cts5_dl=h2o.loadModel(cts5_model_path_DL)
+cts5_gbm=h2o.loadModel(cts5_model_path_GBM)
+cts5_xgboost=h2o.loadModel(cts5_model_path_XGBoost)
+cts5_drf=h2o.loadModel(cts5_model_path_DRF)
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_b_cts5.RData")
+cts5_b_dl=h2o.loadModel(cts5_b_model_path_DL)
+cts5_b_gbm=h2o.loadModel(cts5_b_model_path_GBM)
+cts5_b_xgboost=h2o.loadModel(cts5_b_model_path_XGBoost)
+cts5_b_drf=h2o.loadModel(cts5_b_model_path_DRF)
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_tcga.RData")
+tcga_dl=h2o.loadModel(tcga_model_path_DL)
+tcga_gbm=h2o.loadModel(tcga_model_path_GBM)
+tcga_xgboost=h2o.loadModel(tcga_model_path_XGBoost)
+tcga_drf=h2o.loadModel(tcga_model_path_DRF)
+tcga_glm=h2o.loadModel(tcga_model_path_GLM)
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_tcga_b.RData")
+tcga_b_dl=h2o.loadModel(tcga_b_model_path_DL)
+tcga_b_gbm=h2o.loadModel(tcga_b_model_path_GBM)
+tcga_b_xgboost=h2o.loadModel(tcga_b_model_path_XGBoost)
+tcga_b_drf=h2o.loadModel(tcga_b_model_path_DRF)
+tcga_b_glm=h2o.loadModel(tcga_b_model_path_GLM)
+```
+
+#### Predictores
+
+
+```{r, echo=FALSE}
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_tcga.RData")
+modelo_tcga=h2o.loadModel(tcga_model_path_XGBoost)
+load(file="/Users/nairachiclana/Google Drive/TFG/FEATURES/h2o/modelos_b_cts5.RData")
+modelo_cts5=h2o.loadModel(cts5_b_model_path_DL)
+```
+
+```{r, message=FALSE, warning=FALSE, results="hide"}
+#predecir y sacar prediciones
+prediction_evento_cts5<-predict(modelo_cts5, as.h2o(replicated.cts5_factor))
+predicted_evento_cts5=as.data.frame(prediction_evento_cts5)$predict
+
+prediction_evento_tcga<-predict(modelo_tcga, as.h2o(replicated.tcga_factor))
+predicted_evento_tcga=as.data.frame(prediction_evento_tcga)$predict
+```
+
+```{r}
+#comparar
+table(replicated.cts5_factor$evento)
+table(predicted_evento_cts5)
+
+table(replicated.tcga_factor$evento)
+table(predicted_evento_tcga)
+
+#crear dataset con evento predecido
+df_cts5_predicted=replicated.cts5_factor
+df_cts5_predicted$evento=as.numeric(as.character(predicted_evento_cts5))
+
+df_tcga_predicted=replicated.tcga_factor
+df_tcga_predicted$evento=as.numeric(as.character(predicted_evento_tcga))
+```
+
+#### curvas: real-replicada-predecida con datos replicados con mejor modelo para cada conjunto
+
+
+**CTS5**
+
+```{r, warning=FALSE}
+create_curves<-function(surv.original,surv.df_replicado, surv.df_predecido) {
+  splots<-list()
+  splots[[1]]<-ggsurvplot(surv.original, conf.int = TRUE, censor= TRUE, cex.axis=3, cex.lab=3.0, main="Real Survival curve", pval=TRUE)
+  splots_2<-list()
+  splots_2[[1]]<-ggsurvplot(surv.df_replicado, conf.int = TRUE, censor= TRUE, cex.axis=3, cex.lab=3.0, main="Real replicated dataset survival curve", pval=TRUE)
+  splots_2[[2]]<-ggsurvplot(surv.df_predecido, conf.int = TRUE, censor= TRUE, cex.axis=3, cex.lab=3.0, main="Predicted dataset survival curve",  palette = "Dark2", pval=TRUE)
+  arrange_ggsurvplots(splots, print = TRUE, ncol =1, nrow = 1, risk.table.height = 1)
+  arrange_ggsurvplots(splots_2, print = TRUE, ncol =2, nrow = 1, risk.table.height = 1)
+}
+```
+
+
+- Curvas para toda la población
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~1, data=df.cts5)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~1, data=replicated.cts5)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~1, data=df_cts5_predicted)
+surv.df_predecido
+
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+Variables más significantes  (de las que veremos las curvas)
+
+```{r}
+trainTask_WS <- makeClassifTask(data=replicated.cts5_factor, target="evento", positive=0)
+trainTask <- normalizeFeatures(trainTask_WS,method = "standardize")
+fv2=generateFilterValuesData(trainTask, method = c("chi.squared", "gain.ratio", "information.gain"))
+plotFilterValues( fv2,n.show = ncol(df.cts5)) 
+```
+
+
+- gg_extraidos
+
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~gg_extraidos_hier_k4, data=df.cts5)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~gg_extraidos_hier_k4, data=replicated.cts5)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~gg_extraidos_hier_k4, data=df_cts5_predicted)
+surv.df_predecido
+
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+- nodal status
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~nodal_status_hier_k3, data=df.cts5)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~nodal_status_hier_k3, data=replicated.cts5)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~nodal_status_hier_k3, data=df_cts5_predicted)
+surv.df_predecido
+
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+- riesgo
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~riesgo, data=df.cts5)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~riesgo, data=replicated.cts5)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~riesgo, data=df_cts5_predicted)
+surv.df_predecido
+
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+- hormonoteraphy
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~hormonoteraphy, data=df.cts5)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~hormonoteraphy, data=replicated.cts5)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~hormonoteraphy, data=df_cts5_predicted)
+surv.df_predecido
+
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+
+**TCGA**
+
+- All poblacion
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~1, data=df.tcga)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~1, data=replicated.tcga)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~1, data=df_tcga_predicted)
+surv.df_predecido
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+
+```{r}
+trainTask_WS <- makeClassifTask(data=replicated.tcga_factor, target="evento", positive=0)
+trainTask <- normalizeFeatures(trainTask_WS,method = "standardize")
+fv2=generateFilterValuesData(trainTask, method = c("chi.squared", "gain.ratio", "information.gain"))
+plotFilterValues( fv2,n.show = ncol(df.tcga)) 
+```
+
+- edad
+
+```{r, warning=FALSE}
+surv.original<-survfit(Surv(seguimiento_years, evento)~edad_Kmeans_k3, data=df.tcga)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~edad_Kmeans_k3, data=replicated.tcga)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~edad_Kmeans_k3, data=df_tcga_predicted)
+surv.df_predecido
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+- tumor stage 
+
+```{r}
+surv.original<-survfit(Surv(seguimiento_years, evento)~tumor_stage, data=df.tcga)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~tumor_stage, data=replicated.tcga)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~tumor_stage, data=df_tcga_predicted)
+surv.df_predecido
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+- estado menopausico
+
+```{r}
+surv.original<-survfit(Surv(seguimiento_years, evento)~estado_menop, data=df.tcga)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~estado_menop, data=replicated.tcga)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~estado_menop, data=df_tcga_predicted)
+surv.df_predecido
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+- nodal status
+
+```{r}
+surv.original<-survfit(Surv(seguimiento_years, evento)~nodal_status_k3_neg, data=df.tcga)
+surv.original
+surv.df_replicado<-survfit(Surv(seguimiento_years, evento)~nodal_status_k3_neg, data=replicated.tcga)
+surv.df_replicado
+surv.df_predecido<-survfit(Surv(seguimiento_years, evento)~nodal_status_k3_neg, data=df_tcga_predicted)
+surv.df_predecido
+create_curves(surv.original,surv.df_replicado, surv.df_predecido)
+```
+
+
+
+
+---
+
+```{r, eval=FALSE}
+
+#lb <- aml@leaderboard
+#print(lb, n = nrow(lb))
+
+#aml@leader
+
+#prediction<-predict(aml@leader, test_h2o) # esto sería solo para sacar metricas, predición de verdad en dataset entero
+#as.data.frame(prediction)$p0 
+#length(as.data.frame(prediction)$p0)
+#length(cts5_test_factor)
+
+lb_cts5<-aml_cts5@leaderboard
+head(lb_cts5)
+#aml_cts5@leader
+
+
+
+lb_cts5_balanced<-aml_cts5_balanced@leaderboard
+head(lb_cts5_balanced)
+#aml_cts5_balanced@leader
+
+lb_tcga<-aml_tcga@leaderboard
+head(lb_tcga)
+#aml_tcga@leader
+
+lb_tcga_balanced<-aml_tcga_balanced@leaderboard
+head(lb_tcga_balanced)
+#aml_tcga_balanced@leader
+
+#ACCEDER A LA MEDIA POR CLASE (aml@leader), AHI BALANCEADO PROBABLEMENTE SI CAMBIE-> MIRAR ESO BIEN ANTES DE COGER UN MODELO DEFINITIVO PARA PREDICIÓN
+```
+
+
+# Predecir usando mejores modelos de cada conjunto
+
+### CTS5 - Predición hormonoterapia según supervivencia
+
+
+```{r}
+
+treatments<-c("IA", "TAMOXIFENO","TAMOXIFENO-IA")
+
+predict_survival_horm<-function(new_patient, modelo, t_fijo) {
+
+  probs_0=vector()
+  new_patient=as.data.frame(t(new_patient))
+  colnames(new_patient)=colnames(df.cts5)[ !colnames(df.cts5)==c("evento")]
+  new_patient$seguimiento_years<-as.numeric(as.character(new_patient$seguimiento_years))
+  
+  if (t_fijo==TRUE) {
+    for (treatment in treatments) {
+      #asignar tratamiento
+      hormonoteraphy=treatment
+      new_patient$hormonoteraphy=hormonoteraphy
+      #predecit prob of no recurrence for each treatment
+      pred_0<-as.data.frame(h2o.predict(object=modelo, newdata=as.h2o(new_patient)))$p0
+      probs_0<-c(probs_0, pred_0)
+    }
+  
+    names(probs_0)=treatments
+    probs_0
+    return(probs_0)
+  }
+  
+  else {
+    min_y=min(df.cts5$seguimiento_years)
+    max_y=max(df.cts5$seguimiento_years)
+    years=min_y:max_y
+    ia_years=vector()
+    tamoxifeno_years=vector()
+    tamoxifeno_ia_years=vector()
+    for(year in years) {
+      new_patient$seguimiento_years=year
+      probs_0=vector()
+      for (treatment in treatments) {
+        #asignar tratamiento
+        hormonoteraphy=treatment
+        new_patient$hormonoteraphy=hormonoteraphy
+        #predecit prob of no recurrence for each treatment
+        pred_0<-as.data.frame(h2o.predict(object=modelo, newdata=as.h2o(new_patient)))$p0
+        probs_0<-c(probs_0, pred_0)
+      }
+      ia_years<-c(ia_years, probs_0[1])
+      tamoxifeno_years<-c(tamoxifeno_years, probs_0[2])
+      tamoxifeno_ia_years<-c(tamoxifeno_ia_years, probs_0[3])
+    }
+    
+    plot(years ,ia_years, type="l", lwd=3, pch=10, col="turquoise3", xlab="Years", ylab="Survival probability")
+    lines(years, tamoxifeno_years,type="l", lwd=3, pch=10, col="seagreen3")
+    lines(years, tamoxifeno_ia_years,type="l", lwd=3, pch=10, col="slateblue")
+    legend("topright", legend=c("IA","Tamoxifeno", "Tamoxifeno-IA"),  col=c("turquoise3","seagreen3","slateblue"), cex=0.8, lty=1)
+  }
+  
+}
+```
+
+Prueba paciente cts5 1 
+
+```{r, message=FALSE, results="hide"}
+#create patient
+estado_menop="Premenopausica"
+subtipo_bc_Nuria.ki67="Luminal_A"
+riesgo="ALTO"
+tumor_size_group_paper_score="(20,30]"
+ki67_status_paper_score="Borderline"
+hormone_receptor="Estrogen-and-Progesterone-receptor-positive"
+edad_Kmeans_k4="(0,44]"
+nodal_status_hier_k3="(0,10]"
+gg_extraidos_hier_k4="(11,17]"
+t_prob=4
+hormonoteraphy="dummy"
+
+#colnames
+new_patient=c(estado_menop,subtipo_bc_Nuria.ki67, riesgo,hormonoteraphy, tumor_size_group_paper_score,ki67_status_paper_score,hormone_receptor,edad_Kmeans_k4,nodal_status_hier_k3, gg_extraidos_hier_k4, t_prob) 
+
+#debug(predict_survival_horm)
+plot=predict_survival_horm(new_patient, modelo_cts5, F)
+survival_t=predict_survival_horm(new_patient, modelo_cts5, T)
+```
+
+
+```{r}
+survival_t
+```
+
+
+### TCGA - Predición supervivencia
+ 
+```{r}
+predict_survival<-function(new_patient, modelo, t_fijo) {
+  predictions=vector()
+  new_patient=as.data.frame(t(new_patient))
+  colnames(new_patient)=colnames(df.tcga)[ !colnames(df.tcga)==c("evento")]
+  new_patient$seguimiento_years<-as.numeric(as.character(new_patient$seguimiento_years))
+
+  if(t_fijo==TRUE) {
+    pred_0<-as.data.frame(h2o.predict(object=modelo, newdata=as.h2o(new_patient)))$p0
+    return(pred_0)
+  }
+  
+  else {
+    #Survival curve
+    min_y=min(df.tcga$seguimiento_years)
+    max_y=max(df.tcga$seguimiento_years)
+    years=min_y:max_y
+    for (year in years) {
+      new_patient$seguimiento_years=year
+      pred_t<-as.data.frame(h2o.predict(object=modelo, newdata=as.h2o(new_patient)))$p0
+      predictions=c(predictions, pred_t)
+    }
+
+    z=predictions
+    plot(years, z, type="l", lwd=3, pch=10, col="red", xlab="Years", ylab="Survival probability")
+  }
+  
+}
+```
+
+
+Prueba paciente tcga 1
+
+```{r, message=FALSE, results="hide"}
+#create patient
+tumor_stage="I"
+estado_menop="Postmenopausica"
+hormone_receptor="Estrogen-and-Progesterone-receptor-positive"
+subtipo_bc="HER2-enriched"
+edad_Kmeans_k3="(54,70]"
+nodal_status_k3_neg="(0,8]"
+t_prob=6
+
+#colnames
+new_patient=c(tumor_stage, estado_menop, hormone_receptor,  subtipo_bc, edad_Kmeans_k3, nodal_status_k3_neg, t_prob) 
+
+#debug(predict_survival_horm)
+plot=predict_survival(new_patient, modelo_tcga, F)
+survival_t=predict_survival(new_patient, modelo_tcga, T)
+```
+
+```{r}
+survival_t
+```
+
+```{r, echo=FALSE}
+save(df.tcga, df.cts5, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/df_tcga_cts5.RData")
+```
+
+----
+
+

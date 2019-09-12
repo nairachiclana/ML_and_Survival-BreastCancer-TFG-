@@ -1,0 +1,795 @@
+---
+title: "Datos-Analisis"
+author: "Naira Chiclana García 44717497T"
+date: "Agosto 2019"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# CTS5
+
+```{r, message=FALSE, , echo=FALSE}
+df.cts5<-read.csv("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/CTS5_clusers.csv", dec=",", header=T)
+
+#df.cts5<-read.csv(file="C:\\Users\\nchiclana\\Google Drive\\TFG\\FEATURES\\datasets\\CTS5_clusers.csv", dec=",", header=T)
+```
+
+
+```{r}
+df.cts5<-as.data.frame(df.cts5[, !names(df.cts5) %in% c("X", "gg_afectados_hier_k5", "fecha_diagnostico", "rp", "re",  "her2","estado_ultimo_control", "subtipo_bc")])
+df.cts5$seguimiento_years<-as.numeric(as.character(df.cts5$seguimiento_years))
+df.cts5$grado<-as.factor(df.cts5$grado)
+
+str(df.cts5)
+```
+
+
+Ordenar variables categóricas
+
+```{r}
+df.cts5$estado_menop<-factor(df.cts5$estado_menop, levels=c("Premenopausica", "Postmenopausica"))
+df.cts5$riesgo<-factor(df.cts5$riesgo, levels=c("BAJO", "INTERMEDIO", "ALTO"))
+df.cts5$nodal_status_standard_paper_score<-factor(df.cts5$nodal_status_standard_paper_score, levels=c("Negative", "1","2-3", "4-9", "9+"))
+df.cts5$ki67_status_paper_score<-factor(df.cts5$ki67_status_paper_score, levels=c("Low", "Borderline", "High"))
+df.cts5$hormone_receptor<-factor(df.cts5$hormone_receptor, levels=c("Estrogen-receptor-positive", "Estrogen-and-Progesterone-receptor-positive"))
+```
+
+
+## Feature importance
+
+```{r, message=FALSE}
+library(mlr)
+library(FSelector)
+```
+
+
+```{r}
+trainTask_WS <- makeClassifTask(data=df.cts5, target="evento", positive=1)
+
+trainTask <- normalizeFeatures(trainTask_WS,method = "standardize")
+
+fv2=generateFilterValuesData(trainTask, method = c("chi.squared", "gain.ratio", "information.gain"))
+plotFilterValues( fv2,n.show = ncol(df.cts5))  
+fv2 
+```
+
+
+
+
+**Filter Selection**
+
+
+```{r, warning=FALSE}
+library(FSelector)
+
+aplicar.filtro <-function(data, filtro, subset.size) { 
+  
+  formula<-as.formula(paste("evento",".",sep="~"))
+  
+  #Chi-squared
+  if(filtro=="chi") weigths<-chi.squared(formula, data)
+  #Forest-importance
+  else if(filtro=="forest") weigths<-random.forest.importance(formula, data)
+  #10 best features
+  best.weigths<-cutoff.k(weigths,subset.size)
+  
+  return(best.vbles=best.weigths)
+}
+
+'%ni%' <- Negate('%in%')
+
+chi<-aplicar.filtro (df.cts5, "chi", 20)
+names(df.cts5[names(df.cts5) %ni% chi]) #peores 10
+
+forest<-aplicar.filtro (df.cts5, "forest", 20)
+names(df.cts5[names(df.cts5) %ni% forest])
+```
+
+
+
+Coinciden por ambos filtros que no son significantes,  y no se usan porque ya se han creado otras a partir de ellas. Estandar, paper y clusters no se peuden borrar porque las vamos a comparar previamente.
+
+```{r}
+df.cts5<-as.data.frame(df.cts5[, !names(df.cts5) %in% c("re_status", "her2_status", "rp_status")])
+```
+
+
+```{r, message=FALSE}
+library(KMsurv)
+library(survMisc)
+library(survminer)
+library(gridExtra)
+library(ranger)
+```
+
+
+```{r}
+surv.obj<-Surv(df.cts5$seguimiento_years, df.cts5$evento)
+```
+
+ 
+## Análisis de sueprvivencia de las variables
+
+```{r, eval=FALSE, include=FALSE}
+#prueba de que es lo mismo hacer la media completa que la media de las diferencias
+par(mfrow=c(1,2))
+hist(sum$upper)
+hist(sum$lower)
+
+# DISTRIBUCIÓN SUPER FIABLE
+mean_dif<-sum$upper-sum$lower
+mean_dif<-mean(mean_dif)
+mean_dif
+mean_lower<-mean(sum$lower)
+mean_upper<-mean(sum$upper)
+mean_dif_2<-mean_upper-mean_lower
+mean_dif_2
+```
+
+
+```{r}
+names_factors<-vector()
+for(col in 1:ncol(df.cts5)) {
+  if(is.factor(df.cts5[,col])) names_factors<-c(names_factors, names(df.cts5)[col])
+}
+
+list.curves.pvalues<-function(df, variables) {
+  grid.list<-list()
+  pvalues.list<-list()
+  cox.pvalues.list<-vector()
+  ci.list<-vector()
+  for(v in 1:length(variables)) {
+    var<-variables[v]
+    if(var!="evento" && var!="seguimiento_years") {
+      formula <- as.formula(paste("Surv(seguimiento_years, evento)", var, sep=" ~ "))
+      cox.pvalues.list[v]<-summary(coxph(formula, data=df))$logtest[3]
+      fit<-surv_fit(formula, data=df)
+      pvalues.list[[v]]<-surv_pvalue(fit,  data = NULL, method = "survdiff", test.for.trend = FALSE,combine = FALSE)
+      grid.list[[v]]<-ggsurvplot(fit, data=df, xlab = "Tiempo",  ylab = "Survival Probability", title = paste("Survival ", var),ylim=c(0.6,1), censor=TRUE)
+      fit_sum<-summary(survfit(formula, data=df, type="kaplan-meier"))
+      mean_lower=round(mean(na.omit(fit_sum$lower)),3)
+      mean_upper=round(mean(na.omit(fit_sum$upper)),3)
+      dif=round(mean_upper-mean_lower,3)
+      ci.list[v]<-paste(var, paste(paste(mean_lower, mean_upper, sep="-"), dif, sep=", dif: "), sep=" CI: ")
+    }
+  }
+  return(list(grid.list, pvalues.list, ci.list, cox.pvalues.list))
+} 
+
+
+cts5_survival_data<-list.curves.pvalues(df.cts5, colnames(df.cts5))
+
+#cts5_survival_data<-list.curves.pvalues(df.cts5, names_factors)
+#arrange_ggsurvplots(atac[[1]], print=TRUE, ncol=2, nrow=3)
+
+
+```
+
+```{r}
+cts5_survival_data[[2]] #pvalues surv
+cts5_survival_data[[3]] #CI surv
+cts5_survival_data[[4]] #pvalues cox
+#cts5_survival_data[[1]][[1]]
+#cts5_survival_data[[1]][[2]]
+```
+
+
+
+
+|         |  Pvalue surv | CI  95% surv | dif CI| pvalue cox |
+|----------|----------|------------|--------------|----------------|
+|edad    |   < 0.0001    |0.576-0.999 | 0.423           |     0.4 |
+|edad_standard    |   0.86     |0.854-0.933 | 0.079           |     0.9 |
+|edad_Kmeans_k4    |   0.37     | 0.831-0.943 |  0.112            |     0.4    |
+|tumor_stage_standard   |  0.067     | 0.838-0.935 | 0.097            |      0.08    |
+|tumor_size     |    <0.0001   |0.648-0.982 | 0.334       |    0.1|
+|tumor_size_group_paper_score      |   0.027    |0.823-0.939 |  0.116           |    0.03|
+|tumor_size_hier_k2   |   0.2     |  0.852-0.932 | 0.08          |      0.2   |
+|tumor_size_Kmeans_k3    |   0.074    |  0.837-0.936 |  0.099           |      0.07  |
+|gg_afectados |  <0.0001     | 0.725-0.96 |0.235|     0.005  |
+|nodal_status_standard_paper_score |  <0.0001     | 0.771-0.942 | 0.171 |     <0.0001  |
+|nodal_status_Kmeans_k2      |   0.0063   |0.843-0.929 | 0.086           |     0.01|
+|nodal_status_hier_k3 | <0.0001   |0.811-0.927  | 0.116         |   <0.0001     |  
+|ki67 | < 0.0001   | 0.642-0.988 |0.346         |    0.5    |
+|ki67_status_paper_score  |  0.44    | 0.84-0.94 | 0.1           |    0.5    |
+|ki67_standard  |  0.46    | 0.854-0.933 | 0.079          |    0.5    |
+|ki67_hier_k7  |  0.68    | - too few datos en some groups | -       |    0.7    |
+|hormone_receptor   |   0.79    | 0.855-0.931 |  0.076           |      0.8    |
+|gg_extraidos | 0.00054  | 0.642-0.987 | 0.345         |    0.005    |  
+|gg_extraidos_hier_k4 | 0.074  | 0.825-0.937 | 0.112         |    0.06    |  
+|estado_menop  | 0.71  | 0.855-0.933 |0.078          | 0.7          |
+|grado       |  0.43  |    0.842-0.935 |  0.09        | 0.4           |
+|subtipo_bc_Nuria.ki67    |  0.29   |    0.854-0.933 |  0.079     | 0.3  |
+|riesgo         | 0.0001    | 0.825-0.919 | 0.094           |      <0.0001  |
+|hormonoteraphy         |   0.011     | 0.836-0.943 | 0.107           |     0.02    |
+
+
+Ordenado de mejor a peor
+
+- age: kmeans. dif en pvalues es mas significante que en CI (kmeans k4->standard->disgregada)
+- tumor size (+tumor stage):   paper score el mejor  (paper score->standard=kmeans k3->hier k2->disgregado)
+- nodal status: mejor hier k3 por poco (hier k3->paper/standard->disgregado->kmeans k2)
+- ki67 status: paper-> standard->disgregado->hierk7
+- gg_extraidos: disgregado->hier k4
+- RESTO ÚNICOS: estado_menopausico, grado, subtipo_bc, riesgo, hormonoterapia, hormone receptor
+
+
+
+```{r, warning=FALSE}
+make_survival_curve<-function(df, col, lower_lim, ci, risk_table) {
+  formula<-as.formula(paste("Surv(seguimiento_years, evento)", col, sep=" ~ "))
+  fit<-surv_fit(formula, data=df)
+  if(risk_table==FALSE) g<-ggsurvplot(fit, xlab = "Tiempo", censor = T, conf.int=ci, ylab = "Survival Probability", title = "Survival probability", pval=TRUE,  ggtheme = theme_bw(),ylim=c(lower_lim,1))
+  else g<-ggsurvplot(fit, xlab = "Tiempo", censor = T, conf.int=ci, ylab = "Survival Probability", title = "Survival probability", pval=TRUE,  ylim=c(lower_lim,1),  ggtheme = theme_bw(), risk.table=T, risk.table.col="strata", risk.table.height = 0.32)
+  return(g)
+}
+```
+
+TODOS HECHOS CON MIN 0.5 (MEADIAN NUNCA ALCANZADA)
+
+Elegidos:
+
+```{r, warning=FALSE}
+make_survival_curve(df.cts5, "edad_Kmeans_k4", 0.5, F,T)
+make_survival_curve(df.cts5, "tumor_size_group_paper_score", 0.5, F,T)
+make_survival_curve(df.cts5, "nodal_status_hier_k3" , 0.5, T ,T)
+make_survival_curve(df.cts5, "ki67_status_paper_score", 0.5, F,T)
+make_survival_curve(df.cts5, "gg_extraidos_hier_k4", 0.5, F,T)
+
+```
+
+Resto (únicos):
+
+```{r, warning=FALSE}
+make_survival_curve(df.cts5, "estado_menop", 0.5, T,T)
+make_survival_curve(df.cts5, "subtipo_bc_Nuria.ki67", 0.5, T,T)
+make_survival_curve(df.cts5, "riesgo", 0.5, T,T)
+make_survival_curve(df.cts5, "hormonoteraphy", 0.5, T,T)
+make_survival_curve(df.cts5, "hormone_receptor", 0.5, T,T)
+```
+
+## Datasets
+
+```{r}
+df.standard<-df.cts5[, names(df.cts5) %in% c("evento", "seguimiento_years", "gg_extraidos","age_standard", "nodal_status_standard_paper_score",  "tumor_stage_standard","ki67_standard" ,"estado_menop", "subtipo_bc_Nuria.ki67", "riesgo", "hormonoteraphy", "hormone_receptor")]
+
+df.paper<-df.cts5[, names(df.cts5) %in% c("evento", "seguimiento_years", "gg_extraidos","edad", "nodal_status_standard_paper_score",  "tumor_size_group_paper_score","ki67_status_paper_score" ,"estado_menop", "subtipo_bc_Nuria.ki67", "riesgo", "hormonoteraphy", "hormone_receptor")]
+
+df.choosen<-df.cts5[, names(df.cts5) %in% c("evento", "seguimiento_years", "gg_extraidos_hier_k4","edad_Kmeans_k4", "nodal_status_hier_k3",  "tumor_size_group_paper_score","ki67_status_paper_score" ,"estado_menop", "subtipo_bc_Nuria.ki67", "riesgo", "hormonoteraphy", "hormone_receptor")]
+```
+
+## Cox Model + Test Cox Proportional Hazard Assumption
+
+
+- How to evaluate the PH assumption: https://bookdown.org/sestelo/sa_financial/how-to-evaluate-the-ph-assumption.html
+
+- Statistical significance. The column marked “z” gives the Wald statistic value. It corresponds to the ratio of each regression coefficient to its standard error (z = coef/se(coef)). The wald statistic evaluates, whether the beta (β) coefficient of a given variable is statistically significantly different from 0. From the output above, we can conclude that the variable sex have highly statistically significant coefficients.
+
+- The regression coefficients. The second feature to note in the Cox model results is the the sign of the regression coefficients (coef). A positive sign means that the hazard (risk of death) is higher, and thus the prognosis worse, for subjects with higher values of that variable. The variable sex is encoded as a numeric vector. 1: male, 2: female. The R summary for the Cox model gives the hazard ratio (HR) for the second group relative to the first group, that is, female versus male. The beta coefficient for sex = -0.53 indicates that females have lower risk of death (lower survival rates) than males, in these data.
+
+- Hazard ratios. The exponentiated coefficients (exp(coef) = exp(-0.53) = 0.59), also known as hazard ratios, give the effect size of covariates. For example, being female (sex=2) reduces the hazard by a factor of 0.59, or 41%. Being female is associated with good prognostic.
+
+Confidence intervals of the hazard ratios. The summary output also gives upper and lower 95% confidence intervals for the hazard ratio (exp(coef)), lower 95% bound = 0.4237, upper 95% bound = 0.816.
+
+- Global statistical significance of the model. Finally, the output gives p-values for three alternative tests for overall significance of the model: The likelihood-ratio test, Wald test, and score logrank statistics. These three methods are asymptotically equivalent. For large enough N, they will give similar results. For small N, they may differ somewhat. The Likelihood ratio test has better behavior for small sample sizes, so it is generally preferred.
+
+
+- `fit`: an object of class coxph.object
+- `type`: the type of residuals to present on Y axis. Allowed values include one of c(“martingale”, “deviance”, “score”, “schoenfeld”, “dfbeta”, “dfbetas”, “scaledsch”, “partial”).
+- `linear.predictions: a logical value indicating whether to show linear predictions for observations (TRUE) or just indexed of observations (FALSE) on X axis.
+
+The above index plots show that comparing the magnitudes of the largest dfbeta values to the regression coefficients suggests that none of the observations is terribly influential individually, even though some of the dfbeta values for age and wt.loss are large compared with the others.
+
+It’s also possible to check outliers by visualizing the deviance residuals. The deviance residual is a normalized transform of the martingale residual. These residuals should be roughtly symmetrically distributed about zero with a standard deviation of 1.
+
+Positive values correspond to individuals that “died too soon” compared to expected survival times.
+Negative values correspond to individual that “lived too long”.
+Very large or small values are outliers, which are poorly predicted by the model.
+
+
+
+```{r, warning=FALSE, eval=FALSE}
+#names_factors<-vector()
+#for(col in 1:ncol(df.standard)) {
+#  if(is.factor(df.standard[,col])) names_factors<-c(names_factors, names(df.standard)[col])
+#}
+
+#names_factors<-c(c("edad", "gg_afectados", "gg_extraidos", "score_paper_score"), names_factors)
+#formula<-as.simple.formula(names_factors, collapse="+"), "surv.obj") 
+```
+
+**Standard**
+
+```{r, warning=FALSE}
+formula<-as.simple.formula(paste(colnames(df.standard), collapse="+"), "surv.obj") 
+res.cox <- coxph(formula, data=df.standard)
+summary(res.cox)
+z<-as.data.frame(as.matrix(coef(summary(res.cox))[,5]))$V1
+```
+ 
+
+```{r}
+test.ph<-cox.zph(res.cox)
+test.ph
+#plot(test.ph) #QUE SIGNIFICA???
+```
+
+ **Paper score**
+
+```{r, warning=FALSE}
+formula<-as.simple.formula(paste(colnames(df.paper), collapse="+"), "surv.obj") 
+res.cox <- coxph(formula, data=df.paper)
+summary(res.cox)
+z<-as.data.frame(as.matrix(coef(summary(res.cox))[,5]))$V1
+```
+
+```{r}
+cox.zph(res.cox)
+```
+
+
+**Combinado**
+
+```{r, warning=FALSE}
+formula<-as.simple.formula(paste(colnames(df.choosen), collapse="+"), "surv.obj") 
+res.cox <- coxph(formula, data=df.choosen)
+summary(res.cox)
+z<-as.data.frame(as.matrix(coef(summary(res.cox))[,5]))$V1
+```
+
+```{r}
+cox.zph(res.cox)
+```
+
+
+
+
+TEST 
+
+|          |  Test-p global | Test-rho global  |Test-chisq global  |
+|-----------|---------------|------------------|-------------------|
+|Standard    |   1          |0.03743          | 0.54             |   
+|Paper score |   1          |NA               | 0.37            | 
+|Combinado   |   1          |NA          | 0.5              | 
+
+
+COX MODEL 
+
+|          |   Likelihood ratio test | Wald test   |Logrank test |
+|-----------|---------------|------------------|-------------------|
+|Standard    |   <2e-16          |0.9         | <2e-16            |   
+|Paper score     |   <2e-16          |0.9         | <2e-16            | 
+|Combinado   |   <2e-16          |1           | <2e-16            | 
+
+
+
+
+- the likelihood-ratio test Evalu ́a como de bueno es el ajuste de dos m ́etodos estad ́ısticos enfrentados, bas ́andose en sus  ́ındices likehood. Estos expresan la pro- babilidad de que un conjunto de observaciones sea debido a diferentes valores de para ́metros estad ́ısticos. En nuestro caso, nos indica c ́omo de probable es para un paciente sufrir el evento. A mayor LR, mayor probabilidad. un valor comprendido entre 0 y 1 disminuye la evidencia del evento, mientras que por encima de 1 la incrementa ma ́s cuanto mayor es el valor.
+
+- wald test or chi squared test: Sirve para determinar si las variables que definen a una paciente son significantes, es decir, an ̃aden informacio ́n al modelo. Las variables cuyo resultado de este test sea 0 pueden ser eliminadas sin que afecte de una manera significativa.
+
+- logrank: Es un test de hipo ́tesis no param ́etrico para comparar distribuciones de supervivencia de dos conjuntos, se basa en la hipotesis nula de que no hay diferencia entra las poblaciones para la ocurrencia de un evento
+
+
+
+## Survfit 
+
+```{r}
+bc.fit.km<-survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento)~1, data=df.choosen, type="kaplan-meier")
+bc.fit.km
+print(bc.fit.km, print.rmean=T)
+```
+
+
+
+## Correlation
+
+```{r}
+make.df.numeric<-function(df) {
+  df.numeric<-df
+  for (col in 1:ncol(df)) {
+    if(!is.numeric(df)) df.numeric[,col]<-as.numeric(df[,col])
+  }
+  return(df.numeric)
+}
+
+df.choosen_numeric<-make.df.numeric(df.choosen)
+```
+
+```{r}
+library(corrplot)
+colnames(df.choosen_numeric)<-c("menop", "bc_type", "riesgo", "horm", "evento", "time", "t_size", "ki67", "horm_recep", "edad", "nodal_st", "gg_extr") #para que quepan en plot
+df.choosen_numeric<-scale(df.choosen_numeric)
+
+#SPEARMAN
+subset.CorrelationMatrix<-cor(df.choosen_numeric, method="spearman")
+par(mfrow = c(1,2))
+corrplot(subset.CorrelationMatrix, method="circle")
+corrplot(subset.CorrelationMatrix, method="number")
+
+#KENDALL
+#subset.CorrelationMatrix<-cor(df.choosen_numeric, method="kendall")
+#par(mfrow = c(1,2))
+#corrplot(subset.CorrelationMatrix, method="circle")
+#corrplot(subset.CorrelationMatrix, method="number")
+```
+
+Posibles Correlaciones:
+
+- nodal status + riesgo
+- edad + menop
+- tumor size + riesgo
+
+
+### Pruebas hipótesis
+
+Nodal status + riesgo 
+```{r}
+survdiff(Surv(df.choosen$seguimiento_years, df.choosen$evento)~ nodal_status_hier_k3 + strata(riesgo), df.choosen, rho=0)
+```
+
+edad + estado menop
+
+```{r}
+survdiff(Surv(df.choosen$seguimiento_years, df.choosen$evento)~ edad_Kmeans_k4 + strata(estado_menop), df.choosen, rho=0)
+```
+
+tumor size + riesgo
+
+```{r}
+survdiff(Surv(df.choosen$seguimiento_years, df.choosen$evento)~  riesgo+ strata(tumor_size_group_paper_score), df.choosen, rho=0)
+```
+
+
+
+
+|                     |  Indice correlación | Chisq | pvalue          |Hipótesis |
+|---------------------|---|-------------|------------------|------------|
+|nodal_status_hier_k3 + riesgo |  0.82 | 6.4   |    0.06   |  $H_{1}$     |   
+|edad + estado_menop  |   3.8   | 0.75  | 0.3         |$H_{0}$      | 
+|riesgo + tumor size |   11.3  | 0.51 | 0.005          |$H_{1}$      | 
+
+Depencencia clara solo riesgo+tumor size, la corralción no es tanta (0,46), en cox no es especialmenr uno mejor que otro y en el test estadistico de feature selection también se encuentran cercaos.
+
+
+
+```{r, echo=FALSE}
+write.csv(df.choosen, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/choosen_cts5.csv")
+```
+
+
+
+-----------------
+
+
+
+
+# TGCA
+
+```{r,secho=FALSE}
+df.tcga<-read.csv("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/TCGA_clusers.csv", dec=",", header=T)
+df.tcga<-as.data.frame(df.tcga[, !names(df.tcga) %in% c("X")])
+```
+
+```{r}
+df.tcga$seguimiento_years<-as.numeric(as.character(df.tcga$seguimiento_years))
+str(df.tcga)
+```
+
+
+## Feature importance
+```{r}
+trainTask_WS <- makeClassifTask(data=df.tcga, target="evento", positive=1)
+trainTask <- normalizeFeatures(trainTask_WS,method = "standardize")
+fv2=generateFilterValuesData(trainTask, method = c("chi.squared", "gain.ratio", "information.gain"))
+plotFilterValues( fv2,n.show = ncol(df.tcga))
+```
+```{r}
+#igual que en cts5, her2 status, rp status, re status no tienen importancia y ya se han usado para hormone receptor y subtipos
+df.tcga<-as.data.frame(df.tcga[, !names(df.tcga) %in% c("rp_status", "re_status", "her2_status")])
+
+```
+
+
+
+```{r}
+chi<-aplicar.filtro (df.tcga, "chi", 10)
+names(df.tcga[names(df.tcga) %ni% chi]) #peores 5 con chi
+
+``` 
+
+## Survival analysis of features
+
+```{r}
+surv.obj<-Surv(df.tcga$seguimiento_years, df.tcga$evento)
+bc.fit.km<-survfit(surv.obj~1, data=df.tcga, type="kaplan-meier")
+bc.fit.km
+```
+
+
+```{r, warning=FALSE}
+tcga_survival_data<-list.curves.pvalues(df.tcga, colnames(df.tcga))
+```
+
+```{r}
+tcga_survival_data[[2]] #pvalues surv
+```
+
+
+```{r}
+tcga_survival_data[[3]] #CI surv
+```
+
+```{r}
+tcga_survival_data[[4]] #pvalues cox
+```
+
+
+|         |  Pvalue surv | CI  95% surv | dif CI| pvalue cox |
+|----------|----------|------------|--------------|----------------|
+|edad    |   < 0.0001    |0.489-1| 0.511         |    <0.0001 |
+|edad_standard    |  0.0014    |0.82-0.93 | 0.11         |    0.0004 |
+|edad_Kmeans_k3    |  < 0.0001     | 0.789-0.95 |  0.161    |      <0.0001    |
+|edad_Kmeans_k4    |  < 0.0001     | 0.777-0.955|  0.178    |     <0.0001     |
+|tumor_stage  |  0.00029    | 0.809-0.942 | 0.133      |     0.001   |
+|estadio  | < 0.0001  | 0.788-0.96 |0.172        | 0.01         |
+|gg_afectados |  0.54    |0.612-0.998 |0.386|     0.4|
+|nodal_status_k3_neg | 0.001    | 0.785-0.967 | 0.182 |   0.004 |
+|nodal_status_k4      |   0.61   |0.796-0.962 | 0.166       |    0.6|
+|nodal_status_standard_paper_score| 0.006  |0.788-0.965 | 0.117      |   0.02    |  
+|hormone_receptor   |   0.44    | 0.803-0.949 |  0.146    |   0.5    |
+|estado_menop  | < 0.0001  |0.816-0.924 |0.108         | <0.0001  |
+|subtipo_bc|  0.18  |    0.798-0.958 |  0.16    | 0.2  |
+
+
+Ordenado de mejor a peor 
+
+- edad:k3->k4->estandard->granulada
+- estado nodal (segun num ganglios afectados): k3_neg->standard->k4 ->granulado
+- Resto únicos: estado_menopausico,  subtipo_bc,  hormone receptor, tumor_stage, estadio
+
+```{r}
+df.tcga<-as.data.frame(df.tcga[, !names(df.tcga) %in% c("edad", "gg_afectados")])
+```
+
+
+```{r}
+make_survival_curve(df.tcga, "edad_Kmeans_k3", 0, T, T)
+make_survival_curve(df.tcga, "tumor_stage", 0, T, T)
+make_survival_curve(df.tcga, " nodal_status_k3_neg", 0, T, T)
+make_survival_curve(df.tcga, " nodal_status_k3_neg", 0, T, T)
+make_survival_curve(df.tcga, " estado_menop", 0, T, T)
+make_survival_curve(df.tcga, "subtipo_bc", 0, F, T)
+make_survival_curve(df.tcga, "hormone_receptor", 0, F, T)
+```
+
+
+
+
+
+
+
+
+
+
+
+## Datasets
+
+```{r}
+df.standard<-df.tcga[, names(df.tcga) %in% c("evento", "seguimiento_years",  "estado_menop", "hormone_receptor", "nodal_status_standard_paper_score", "age_standard", "subtipo_bc")]
+
+df.choosen<-df.tcga[, names(df.tcga) %in% c("evento", "seguimiento_years", "tumor_stage",  "estado_menop", "hormone_receptor", "nodal_status_k3_neg", "edad_Kmeans_k3", "subtipo_bc")]
+```
+
+## Cox model + Test Cox proportional 
+
+**Standard**
+
+```{r, warning=FALSE}
+formula<-as.simple.formula(paste(colnames(df.standard), collapse="+"), "surv.obj") 
+res.cox1 <- coxph(formula, data=df.standard)
+summary(res.cox1)
+```
+
+```{r, warning=FALSE}
+test.ph<-cox.zph(res.cox1)
+test.ph
+```
+
+Lo cumple.
+
+**Combinado**
+
+```{r, warning=FALSE}
+formula<-as.simple.formula(paste(colnames(df.choosen), collapse="+"), "surv.obj") 
+res.cox2 <- coxph(formula, data=df.choosen)
+summary(res.cox2)
+```
+
+```{r, warning=FALSE}
+test.ph<-cox.zph(res.cox2)
+test.ph
+```
+
+Si lo cumple
+
+TEST 
+
+|          |  Test-p global | Test-rho global  |Test-chisq global  |
+|-----------|---------------|------------------|-------------------|
+|Standard    |   0          | NA        | 8.91e+03        |   
+|Combinado   |   1          | NA          | 0.591             | 
+
+COX MODEL 
+
+|          |   Likelihood ratio test | Wald test   |Logrank test |
+|-----------|---------------|------------------|-----------------|
+|Standard    |   <2e-16         |0.6       | <2e-16         |   
+|Combinado   |   <2e-16         | 0.9          | <2e-16          | 
+
+
+Mejor combinado.
+
+
+
+CURVAS MAS SIGNIFICANTES SEGÚN COX: nodal status k3 y tumor stage
+
+```{r}
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ nodal_status_k3_neg + tumor_stage, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal etapa tumoral", conf.int = T, 
+        facet.by = "nodal_status_k3_neg", legend.title = "tumor_stage", short.panel.labs = T)
+
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ tumor_stage + nodal_status_k3_neg, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal etapa tumoral", conf.int = T, 
+        facet.by = "tumor_stage", legend.title = "nodal_status_k3_neg", short.panel.labs = T)
+```
+
+
+MAS SIGNIFICANTES SEGÚN SURVIVAL:edad, estado menop y tumor stage
+
+```{r}
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ edad_Kmeans_k3 + nodal_status_k3_neg, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal etapa tumoral", conf.int = T, 
+        facet.by = "edad_Kmeans_k3", legend.title = "nodal_status_k3_neg", short.panel.labs = T)
+
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ edad_Kmeans_k3 + nodal_status_k3_neg, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal etapa tumoral", conf.int = T, 
+        facet.by = "nodal_status_k3_neg", legend.title = "edad_Kmeans_k3", short.panel.labs = T)
+```
+
+
+
+
+```{r}
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ estado_menop+nodal_status_k3_neg, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal etapa tumoral", conf.int = T, 
+        facet.by = "estado_menop", legend.title = "nodal_status_k3_neg", short.panel.labs = T)
+
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ estado_menop+nodal_status_k3_neg, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal etapa tumoral", conf.int = T, 
+        facet.by = "nodal_status_k3_neg", legend.title = "estado_menop", short.panel.labs = T)
+```
+
+
+## Survfit 
+
+```{r}
+bc.fit.km<-survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento)~1, data=df.choosen, type="kaplan-meier")
+bc.fit.km
+print(bc.fit.km, print.rmean=T)
+```
+
+## Correlation
+
+
+```{r}
+df.choosen_numeric<-make.df.numeric(df.choosen)
+
+str(df.choosen_numeric)
+
+```
+
+```{r}
+library(corrplot)
+df.choosen_numeric<-scale(df.choosen_numeric)
+colnames(df.choosen_numeric)<-c("t_size", "menop", "time", "evento", "horm_recep","bc_type",  "edad", "nodal_st")
+#SPEARMAN
+subset.CorrelationMatrix<-cor(df.choosen_numeric, method="spearman")
+par(mfrow = c(1,2))
+corrplot(subset.CorrelationMatrix, method="circle")
+corrplot(subset.CorrelationMatrix, method="number")
+
+#KENDALL
+#subset.CorrelationMatrix<-cor(df.choosen_numeric, method="kendall")
+#par(mfrow = c(1,2))
+#corrplot(subset.CorrelationMatrix, method="circle")
+#corrplot(subset.CorrelationMatrix, method="number")
+```
+
+Correlaciones observadas:
+
+- estado menopausico y edad (-0.67)
+- subtipo bc y hormone receptor (0.43)
+
+
+ANALISIS DE LAS DEPENDENCIAS 
+
+**CURVAS**
+
+```{r}
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ estado_menop+edad_Kmeans_k3, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado menopausico y edad", conf.int = T, 
+        facet.by = "estado_menop", legend.title = "edad_Kmeans_k3", short.panel.labs = T)
+
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ estado_menop+edad_Kmeans_k3, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado menopausico y edad", conf.int = T, 
+        facet.by = "edad_Kmeans_k3", legend.title = "estado_menop", short.panel.labs = T)
+
+```
+
+```{r}
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ subtipo_bc+hormone_receptor, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia receptores hormonales y subtipo bc", conf.int = T, 
+        facet.by = "subtipo_bc", legend.title = "hormone_receptor", short.panel.labs = T)
+
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ subtipo_bc+hormone_receptor, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia receptores hormonales y subtipo bc", conf.int = T, 
+        facet.by = "hormone_receptor", legend.title = "subtipo_bc", short.panel.labs = T)
+
+```
+
+```{r}
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ nodal_status_k3_neg+tumor_stage, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal con etapa tumoral", conf.int = T, 
+        facet.by = "nodal_status_k3_neg", legend.title = "tumor_stage", short.panel.labs = T)
+
+survfit(Surv(df.choosen$seguimiento_years, df.choosen$evento) ~ nodal_status_k3_neg+tumor_stage, df.choosen, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia estado nodal con etapa tumoral", conf.int = T, 
+        facet.by = "tumor_stage", legend.title = "nodal_status_k3_neg", short.panel.labs = T)
+
+```
+
+### Pruebas hipótesis
+
+
+subtipo bc y hormone receptor (0.43)
+
+```{r, eval=FALSE}
+survdiff(Surv(df.choosen$seguimiento_years, df.choosen$evento)~ subtipo_bc + strata(hormone_receptor), df.choosen, rho=1)
+
+df.choosen<-as.data.frame(df.choosen[, !names(df.choosen) %in% c("hormone_receptor")])
+```
+
+estado menopausico y edad (-0.67)
+```{r}
+survdiff(Surv(df.choosen$seguimiento_years, df.choosen$evento)~ edad_Kmeans_k3 + strata(estado_menop), df.choosen, rho=0)
+```
+
+|                     | Indice correlacion  | pvalue          |Hipótesis |
+|-------------------|--------------|------------------|------------|
+|subtipo bc + hormone receptor | 0.43       | 0.6| $H_{0}$     |   
+|menopausia + edad  | -0.67      | 0.002         |$H_{1}$      | 
+
+
+Aceptamos la dependencia de menopausia y edad
+
+
+
+
+```{r, echo=FALSE}
+write.csv(df.choosen, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/choosen_tcga.csv")
+```
+
+
+
+
+
+

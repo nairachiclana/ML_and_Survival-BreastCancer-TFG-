@@ -1,0 +1,1036 @@
+---
+title: 'Primera Tarea: Paper CTS5'
+author: "Naira María Chiclana García 44717497T"
+date: "Febrero 2019"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+
+# Datos
+
+Para este estudio hemos usado datos clínicos de pacientes con cancer de mama. Las pacientes son RRHH positivos tratadas con hormonoterapia adyuvante con o sin quimioterapia adyuvante, libres de enfermedad a 5 años del primer diagnóstico.
+
+
+## Cargar tabla
+
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+setwd("/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/")
+CTS5.data<-read.csv("CTS5_RWD_analisis.csv", dec=",", header=T, sep=";")
+dim(CTS5.data)
+str(CTS5.data)
+```
+
+En el dataset original contamos con 20 variables y 1195 pacientes. Estos datos se reducirán ya que los trataremos, en esta vista previa ya podemos ver algunos valores vacios o incoherentes. Los veremos con más detalle en el siguiente punto.
+
+## Limpieza de datos 
+
+Veremos todas las variables de tipo factor y visualizaremos sus distintos valores (*levels*), para hacernos una idea de cuales son necesarios eliminar o imputar.
+
+```{r}
+#Variables de tipo factor
+factores<-vector()
+for (col in colnames(CTS5.data)) {
+  if(is.factor(CTS5.data[,c(col)])) factores<-c(factores, col)
+}
+niveles.factor<-list()
+#Niveles de las variables factor
+for(col in factores) niveles.factor[[col]]<-levels(CTS5.data[,col])
+niveles.factor
+```
+
+### Transformación variables clínicas
+
+
+Haremos algunas modificaciones, las dividiremos en 3 bloques: 
+
+- Transformaciones de etiquetas (`labels`) en variables de tipo factor: Modificaremos el valor de los identificadores de Post y Pre menopausicas para que sean legibles. De los tipos Luminal eliminaremos los espacios para facilitar su manejo. Igual para el tamaño del tumor.
+
+- Eliminaciones de datos perdidos o inexistentes: Eliminaremos aquellos pacientes cuyo tipo luminal no está definido, `"LUMINAL ND"` (de la variable `fenotipo_ihq`). Eliminaremos pacientes con quimioterapia no definida. También eliminaremos las columnas `X.1` y `X`, ya que solo contienen valores vacios y no nos aportan ninguna información. También los valores NA en los ganglios.
+
+- Transformaciones de formato: El `evento` y `seguimiento` los transformaremos a numericos ya que será necesario de esta manera para los análisis de supervivencia. También añadiremos una columna de tiempo en años en lugar de meses.
+
+
+```{r}
+#Transformaciones de etiquetas
+CTS5.data$estado_menop<-factor(CTS5.data$estado_menop, labels=c("Postmenopausica", "Premenopausica"))
+CTS5.data$fenotipo_ihq<-factor(CTS5.data$fenotipo_ihq,levels=c("LUMINAL A","LUMINAL B"), labels=c("Luminal_A", "Luminal_B"))
+colnames(CTS5.data)[which(names(CTS5.data) == "tama.o")] <- "tumor_size"
+
+#Eliminaciones de valores no definidos
+CTS5.data<-CTS5.data[as.factor(CTS5.data$fenotipo_ihq)!="LUMINAL ND",]
+CTS5.data<-CTS5.data[as.factor(CTS5.data$qt)!="ND",]
+CTS5.data<-CTS5.data[ , !names(CTS5.data) %in% c("X.1", "X")]
+CTS5.data<-CTS5.data[!is.na(as.numeric(CTS5.data$gg_afectados)),]
+
+#Transformaciones de formato
+CTS5.data$evento<-as.numeric(factor(CTS5.data$evento, labels=c("0", "1"))) -1
+CTS5.data$seguimiento_m<-as.integer(CTS5.data$seguimiento_m)
+CTS5.data$seguimiento_years<-CTS5.data$seguimiento_m/12
+
+str(CTS5.data)
+```
+
+Columnas resultantes: 
+
+- **n_orden:** Identificación del paciente.
+
+- **edad: ** Edad en años del paciente.
+
+- **estado_menop: ** Estado menopausico del paciente, puede ser post o pre menopausico.
+
+- **tumor_size: ** Tamaño del tumor en milímetros.
+
+- **grado**: Grado del tumor.
+
+- **gg_afectados y gg_score**: Número de ganglios (nódulos) afectados y el grado al que corresponden.
+
+- **riesgo**: Gravedad del riesgo: alto, bajo o intermedio.
+
+- **ki67**: $Ki-67$ Es una proteina en las células que se incrementa cuando estas se van a dividir en nuevas células. Esta variable indica el porcentaje de células positivas, y a mayor porcentaje, más rapidamente se dividirán. Para el cancer de mama se considera: bajo si es menor que 10%, en el límite si está entre 10-20% y alto si es mayor al 20%. 
+
+- **qt**: Quimioterapia aplicada.
+
+- **ht**: Hormonoterapia aplicada.
+
+- **seguimiento_m**: Tiempo de seguimiento del paciente en meses.
+
+- **evento**: Si se ha tenido lugar una recurrencia o no en ese tiempo. 1 se ha producido, 0 el paciente está censurado.
+
+ - **score**:  Medida que integra los factores y usada para medir el riesgo de recurrencia pasados 5 años.
+
+###  Estratificación variables clínicas
+
+Excepto para la edad, para las agrupaciones de variables replicaremos los grupos vistos en el paper para su posterior comparación y análisis.
+
+- **Tamaño tumor** nos basaremos en la división de la Tabla 1 del artículo $Doswett$: $<10, 10-20, 20-30 y >30$.
+
+- **Estado nodal** igualmente, basandonos en la Tabla 1. Negativo si no hay ningún ganglio afectado, y en caso positivo, dividir en $1, 2-3, 4-9, 9+$
+
+- **Estado Ki-67** según la literatura médica, se considerara Bajo si el porcentaje es $<10%$, en el límite si se encuentra entre $10-20%$ y Alto si $>20%$.
+
+- **Estado hormonal** Al igual que lo hace el paper, lo dividiremos en positivos en estrogenos, progesterona, en ambos, o en ninguno.
+
+- **Quimioterapia** Si ha recibido o no.
+
+- **Edad** la agruparemos por clustering.
+
+
+```{r, warning=FALSE}
+#Agrupación por tamaño tumor
+tam_min=min(CTS5.data$tumor_size)
+tam_max=max(CTS5.data$tumor_size)
+CTS5.data$tumor_size_group<-cut(CTS5.data$tumor_size, breaks=c(tam_min,10,20,30,tam_max))
+
+#Nodal status  (No. of positive nodes->gg_afectados) 
+max_gg=max(CTS5.data$gg_afectados)
+nodal_status<-vector()
+for (r in 1:nrow(CTS5.data)) {
+  gg=CTS5.data$gg_afectados[r]
+  if(gg==0) nodal_status[r]="Negative"
+  else {
+    if(gg==1) nodal_status[r]="1"
+    else if (gg>=2 && gg<=3) nodal_status[r]="2-3"
+    else if (gg>=4 && gg<=9) nodal_status[r]="4-9"
+    else if (gg>9) nodal_status[r]="9+"
+  }
+}
+CTS5.data$nodal_status<-as.factor(nodal_status)
+
+#ki67 
+CTS5.data$ki67<-as.numeric(CTS5.data$ki67)
+max_ki67=max(CTS5.data$ki67)
+ki67_status<-vector()
+for (r in 1:nrow(CTS5.data)) {
+  percentage=CTS5.data$ki67[r]
+  if(percentage<10) ki67_status[r]="Low"
+  else {
+    if(percentage>=10 && percentage<=20) ki67_status[r]="Borderline"
+    else if (percentage>20) ki67_status[r]="High"
+  }
+}
+CTS5.data$ki67_status<-as.factor(ki67_status)
+
+#HR (Hormone Receptor)
+HR_status<-vector()
+for (r in 1:nrow(CTS5.data)) {
+  er=CTS5.data$re[r]
+  pr=CTS5.data$rp[r]
+  if(er!="N" && pr!="N") HR_status[r]="estrogen-and-progesterone-receptor-positive"
+  if(er!="N" && (pr=="N" ||pr=="ND")) HR_status[r]="estrogen-receptor-positive" 
+  if(pr!="N" && pr!="ND" && er=="N")  HR_status[r]="progesterone-receptor-positive" 
+  if (er=="N" && pr=="N")  HR_status[r]="hormone-receptor-negative" 
+}
+CTS5.data$HR_status<-as.factor(HR_status)
+
+#QT (Received chemotherapy or not)
+chemotherapy_group<-vector()
+for (r in 1:nrow(CTS5.data)) {
+  chemo=CTS5.data$qt[r]
+  if(chemo=="NO") chemotherapy_group[r]="NO"
+  else chemotherapy_group[r]="YES"
+}
+CTS5.data$chemotherapy_group<-as.factor(chemotherapy_group)
+```
+
+Para dividir la edad usaremos 3 grupos hechos por clustering.
+
+```{r, message=FALSE}
+library(factoextra)
+```
+
+```{r}
+#Edad
+data<-CTS5.data
+data$d1<-rep(1,length(CTS5.data$edad))
+#Convert factor variables to numeric 'dummy' variables
+data.num=model.matrix(d1+edad~edad, data)
+data$cl= kmeans(data.num,3)$cluster
+#distribución de los datoss
+table(data$cl)
+CTS5.data$GrupoEdadCluster<-cut(CTS5.data$edad, breaks=c(23,48,63,88))
+table(CTS5.data$GrupoEdadCluster)
+
+BC<-CTS5.data
+```
+
+Los grupos están bien proporcionados, teniendo su mayor concentración de pacientes el grupo comprendido entre la edad $48$ y $63$ años.
+
+```{r, echo=FALSE, eval=FALSE}
+write.csv(BC, file="/Users/nairachiclana/Google Drive/TFG/FEATURES/datasets/")
+```
+
+# Análisis
+
+Una vez tenemos los datos preparados y limpios, podremos proceder los análisis propuestos.
+
+
+
+
+```{r, message=FALSE}
+library(KMsurv)
+library(survMisc)
+library(survminer)
+library(flexsurv)
+library(dplyr)
+library(UCSCXenaTools)
+library(TCGAretriever) 
+library(ggfortify)
+```
+
+**SLED**: Supervivencia libre de enfermedad a distancia
+
+Todo para grupos pronostico:
+
+- Población total: haremos una estimación de esta a partir de nuestras 900 pacientes.
+
+- Premenopausicas y Postmenopausicas
+
+```{r}
+table(BC$estado_menop)
+```
+
+Hay más pacientes Postmenopausicas.
+
+
+- Luminal A y Luminal B
+
+```{r}
+table(BC$fenotipo_ihq)
+```
+
+Los grupos Luminal están balanceados.
+
+
+Creamos un objeto supervivencia con `Surv()` a partir del tiempo hasta el evento y el indicador de censura (apareceran los tiempos y un + alado de los casos que sí estén censurados).
+
+```{r}
+BC<-CTS5.data
+```
+
+```{r}
+surv.obj<-Surv(BC$seguimiento_years, BC$evento) 
+surv.obj[1:100]
+```
+
+```{r}
+table(BC$evento)
+```
+
+La mayoría de los datos son censurados, es decir, para esas pacientes no se ha llegado a observar el evento (recurrencia) en el tiempo del estudio. Esto podrá causar que nuestros resultados no sean exactos ni demasiado fiables, además de unos intervalos de confianza demasiado amplios.
+
+
+
+## Riesgo anual de recidiva 
+
+*Las tablas con los resultados completos se encuentran en* [Resultados: Tablas de riesgo](#resultados21)
+
+**Calcular el riesgo anual de recidiva y su 95% CI**:
+
+Con la función `survfit()` y el estimador que se le indique. Lo haremos mediante estimadores no parámetricos, ya que el tiempo no sigue una distribución, como podemos ver en el siguiente histograma:
+
+```{r}
+qplot(BC$seguimiento_years, geom="histogram")
+```
+
+Tenemos  a nuestra disposición varios estimadores no paramétricos (*kaplan-meier, fleming-harrington, fh2,...*). Por ahora usaremos *Kaplan-meier* (estimador del límite del producto) que calculará la supervivencia, en proporciones exactas.
+
+Para el análisis de supervivencia usaremos la función `survfit()`. A esta se le indica `objeto surv ~ nombre de las covariables` o `1`, en cuyo caso lo hará para la población global, usando todas las pacientes.
+
+Por defecto lo hace con un intervalo de confianza de un 95%, por lo que no tendremos que indicarle nada para ese parámetro.
+
+En cada caso, visualizaremos las curvas solas para verlas con claridad y con tablas de eventos acumulados y riesgo.
+
+####Toda la población
+
+```{r}
+bc.fit.km<-survfit(Surv(BC$seguimiento_years, BC$evento)~1, data=BC, type="kaplan-meier")
+bc.fit.km.df<-fortify(bc.fit.km) 
+bc.fit.km.df[1:10,]
+```
+
+```{r, warning=FALSE}
+ggsurvplot(bc.fit.km, data=BC, xlab = "Tiempo", censor = T, conf.int=T, ylab = "Survival Probability", title = "Survival probability",  ggtheme = theme_bw(), surv.median.line="hv",  ylim = c(0.6, 1))
+
+ggsurvplot(bc.fit.km,  xlab = "Tiempo", censor = T, conf.int=T, ylab = "Survival Probability", title = "Survival probability", risk.table = T, cumevents=T, surv.median.line="hv", ylim = c(0.6, 1))
+```
+
+Aún usando todos los pacientes, el intervalo de confianza es considerablemente grande, lo que conllevará que los subgrupos seán aún menos precisos. Los eventos comienzan a aparecer a partir de 5 años de terapia endocrina.
+
+
+**Riesgo**:
+
+```{r}
+bc.fit.ra<-survfit(surv.obj~1) %>% fortify %>% mutate(CumHaz = cumsum(n.event/n.risk))
+head(bc.fit.ra)
+
+ggsurvplot(bc.fit.km, fun="cumhaz", xlab="Tiempo(meses)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T, conf.int=T, palette="Dark2",  ggtheme = theme_bw())
+```
+
+
+#### Menopausia:
+
+```{r}
+bc.fit.km.menostat<-survfit(surv.obj~estado_menop, data=BC, type="kaplan-meier")
+head(fortify(bc.fit.km.menostat, strata=estado_menop))
+```
+
+```{r, warning=FALSE}
+ggsurvplot(bc.fit.km.menostat, data=BC, xlab = "Tiempo", censor = T, conf.int=T, ylab = "Survival Probability", title = "Survival probability menopausal levels",  ggtheme = theme_bw(), surv.median.line="hv",  ylim = c(0.6, 1))
+```
+
+Como esperábamos después de ver la población global, los subgrupos son muy poco fiables, y ver estos intervalos solo nos distraerá de la forma de las curvas, por lo que los eliminaremos a partir de ahora.
+
+
+```{r, warning=FALSE}
+ggsurvplot(bc.fit.km.menostat, data=BC, xlab = "Tiempo(años)", censor = T, conf.int=F, ylab = "Survival Probability", title = "Survival probability for menopausal levels",  ggtheme = theme_bw(), surv.median.line="hv",  ylim = c(0.75, 1))
+
+ggsurvplot(bc.fit.km.menostat,  xlab = "Tiempo(años)", censor = T, conf.int=F, ylab = "Survival Probability", title = "Survival probability", risk.table = T, cumevents=T, surv.median.line="hv", ylim = c(0.6, 1))
+
+bc.fit.menos<-survfit(surv.obj~BC$estado_menop) %>% fortify %>% mutate(CumHaz = cumsum(n.event/n.risk))
+head(bc.fit.menos)
+
+ggsurvplot(bc.fit.km.menostat, fun="cumhaz", xlab="Tiempo(años)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T, conf.int=F, palette="Dark2",  ggtheme = theme_bw())
+
+ggsurvplot(bc.fit.km.menostat, fun="cumhaz", xlab="Tiempo(años)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T, conf.int=F, palette="Dark2",  ggtheme = theme_bw(), risk.table = T, cumevents=T)
+
+```
+
+Para ambos subgrupos la ocurrencia de eventos no tiene lugar en tiempo previo a 5 años, donde hay numerosos eventos hasta 15 años, tiempo a partir del cual hay una estabilización.
+
+Las premenopausicas parecen tener una supervivencia menor, pero probablemente se deba a la notable cantidad inferior de datos, donde un evento causa más efecto global en el aumento del riesgo que en el grupo de postmenopausicas.
+
+####Luminal:
+
+```{r}
+bc.fit.km.luminal<-survfit(surv.obj~fenotipo_ihq , data=BC, type="kaplan-meier")
+head(fortify(bc.fit.km.luminal, strata=fenotipo_ihq ))
+```
+
+
+
+```{r, warning=FALSE}
+
+ggsurvplot(bc.fit.km.luminal, data=BC, xlab = "Tiempo", censor = T, conf.int=F, ylab = "Survival Probability", title = "Survival probability for Luminals",  ggtheme = theme_bw(), surv.median.line="hv",  ylim = c(0.75, 1), pval=T)
+
+ggsurvplot(bc.fit.km.luminal,  xlab = "Tiempo", censor = T, conf.int=F, ylab = "Survival Probability", title = "Survival probability for Luminals", risk.table = T, cumevents=T, surv.median.line="hv", ylim = c(0.6, 1))
+
+bc.fit.lum<-survfit(surv.obj~BC$fenotipo_ihq ) %>% fortify %>% mutate(CumHaz = cumsum(n.event/n.risk))
+head(bc.fit.lum)
+
+ggsurvplot(bc.fit.km.luminal, fun="cumhaz", xlab="Tiempo(años)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T, conf.int=F, palette="Dark2",  ggtheme = theme_bw())
+
+ggsurvplot(bc.fit.km.luminal, fun="cumhaz", xlab="Tiempo(años)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T, conf.int=F, palette="Dark2",  ggtheme = theme_bw(), risk.table = T, cumevents=T)
+```
+
+Hay un comportamiento muy similar al explicado en los grupos menopausicos. En este caso los grupos sí están balanceados y solo con estas gráficas no podemos definir cual tiene un riesgo mayor. Al comiendo de los tiempos  Luminal B parece ser más agresivo hasta pasados los 10 años de observación, pero luego intercambian en posiciones porque en A sigue habiendo alfunas muertes mientras en B se estabilizan. Otra vez más los resultados están condicionados por la poca cantidad de datos y no podemos afirmar nada con seguridad.
+
+---------------
+
+
+## SLED para grupos pronóstico y HR {#pto22}
+
+
+**Analizar posibles diferencias entre las supervivencias de los tres grupos pronóstico y HRs considerando el grupo de bajo riesgo como grupo de referencia.**
+
+**Grupos pronostico**
+
+Para usar el grupo de bajo riesgo como referencia, cambiaremos el orden de los niveles para ponerlo el primero:
+
+```{r}
+BC$riesgo<- relevel(BC$riesgo, "BAJO")
+```
+
+La menor cantidad de pacientes está en el grupo `Intermedio`, y la mayor (aunque muy parecida a `Bajo`) está en `Alto`.
+
+
+```{r, warning=FALSE}
+
+table(BC$riesgo)
+
+bc.fit.km.riesgo<-survfit(surv.obj~riesgo, data=BC, type="kaplan-meier")
+
+ggsurvplot(bc.fit.km.riesgo, data=BC, xlab = "Tiempo", censor = T, conf.int=T, ylab = "Survival Probability", title = "Survival probability for Risk gruops",  ggtheme = theme_bw(), surv.median.line="hv",  ylim = c(0.6, 1),  pval=T)
+
+ggsurvplot(bc.fit.km.riesgo, fun="cumhaz", xlab="Tiempo(años)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T, conf.int=T,  ggtheme = theme_bw())
+
+```
+
+Las curvas coinciden con lo esperado, a menor riesgo, mayor probabilidad de sobrevivir y viceversa. El grupo de `bajo` riesgo se encuentra bastante más alejado mientras que `intermedio` y `alto` presentan bastante similitud.
+
+**HR**
+
+```{r, warning=FALSE}
+table(BC$HR_status)
+prop.table(table(BC$HR_status))
+```
+
+Según la literatura médica, un 80% de los canceres de mama son *ER-Positive*, y de estos, un 65% son también *PR-Positive*, por lo que eran de esperar estos grupos están tan desbalanceados. Hay muchísima más cantidad de pacientes positivos en progesterona y estrógeno que en el resto (un 88%). Positivos solo en progesterona son los mínimos (un 3%) mientras que no hay ningun paciente negativo en ambos. Los resultados coinciden con la teoría.
+
+
+```{r, warning=FALSE}
+bc.fit.km.hr<-survfit(surv.obj~HR_status, data=BC, type="kaplan-meier")
+
+ggsurvplot(bc.fit.km.hr, data=BC, xlab = "Tiempo", censor = T,  ylab = "Survival Probability", title = "Survival probability for Risk gruops",  ggtheme = theme_bw(), surv.median.line="hv",  ylim = c(0.6, 1),  pval=T)
+
+ggsurvplot(bc.fit.km.hr, fun="cumhaz", xlab="Tiempo(años)", ylab="Riempo acumulado", main="Riesgo acumulado", censor=T,  ggtheme = theme_bw())
+
+```
+
+
+En las curvas observamos que el grupo con menor esperanzas es el positivo en ambas hormonas, y el de menor riesgo aquel positivo solo en progesterona. Este resultado no es demasiado coherente, ya que al ser receptivo en más hormonas, esperamos que tenga más probabilidades de responder al tratamiento hormonal.
+
+
+
+```{r}
+fit<-surv_fit(Surv(seguimiento_m, evento)~HR_status, data=BC)
+```
+Si comprobamos el pvalue resultante de estas curvas (p=0.6 o un 60% de probabilidad de que los resultados se deban al azar), efectivamente no es un resultado fiable. Es comprensible debido a la mínima cantidad de datos en estos dos grupos que parecen tener más supervivencia no podemos considerar estas estimaciones como reales.
+
+
+
+Veamos como explican el riesgo los grupos de riesgo y los receptores hormonales en conjunto:
+
+
+```{r, warning=FALSE}
+survfit(surv.obj ~ HR_status + riesgo, BC, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia HR según grupo pronóstico", ylim = c(0.6, 1),
+        facet.by = "HR_status", legend.title = "riesgo", short.panel.labs = T)
+
+with(BC, table(riesgo, HR_status))
+
+```
+
+En el grupo  receptivo para progesterona y estrógeno los valores de supervivencia según el riesgo coinciden coherentemente con los vistos anteriormente (más superviencia para el de bajo riesgo y menos para el de alto riesgo). Para los otros dos grupos hormonales intermedio aparece con menor supervivencia, pero no lo tendremos en cuenta ya que de por sí en estos grupos hormonales había muy pocos datos, al vovler a dividirlos no tenemos suficientes como para poder hacer deduciones estadísticas. 
+
+```{r, warning=FALSE}
+survfit(surv.obj ~ riesgo + HR_status, BC, conf.type = "log-log") %>% 
+    ggsurvplot(title = "Supervivencia grupo pronóstico según HR", ylim = c(0.6, 1),
+        facet.by = "riesgo", legend.title = "HR_status", short.panel.labs = T)
+
+with(BC, table(HR_status, riesgo))
+```
+
+Si vemos los grupos de riesgo divididos en los grupos de receptores hormonales, ocurre lo mismo, en general el positivo en ambas hormonas parece ser el de menor supervivencia, alcanzando sus valores más bajos para el alto riesgo.
+
+Veamos con detalle usando Regresión de Cox como influye cada nivel a la explicación del riesgo tomando el grupo `BAJO` como referencia.
+
+
+
+```{r}
+res.cox <- coxph(surv.obj~riesgo+HR_status, data=BC)
+res.cox
+```
+
+- `coef` Coeficiente ß estimado. ß Da una idea  del impacto de cada una de las variables en el pronóstico.
+
+- `exp(coef)`
+
+- `se(coef)` Desviación estandar de la estimación.
+
+- `z` valor estadístico del test de Wald para ß=0.
+
+- `p` p-value del test Wald.
+
+
+Riesgo `ALTO`es con diferencia la más influyente, con un valor $ß=1$ y un p-value de $8.38e-05$. El siguiente más influyente es el receptor positivo de progesterona, el cual influye de forma inversa, con un coeficiente de $-0.48$. La variable menos influyente es riesgo `Intermedio` (la que menos pacientes tiene).
+
+----
+
+##  Mediana de SLED a 10 años para grupos de riesgo {#pto23}
+
+**Calcular valores de la mediana de SLED para cada uno de los grupos de riesgo a 10 años, con sus correspondientes 95% CI.**
+
+La mediana representa el valor de la variable de posición central en un conjunto de datos ordenados.
+
+```{r}
+#tabla con tiempo hasta 10 años:
+BC_orderby_time<- BC[order(BC$seguimiento_years),] 
+BC_till_10years<-BC_orderby_time[BC_orderby_time$seguimiento_years<=10,]
+max(BC_till_10years$seguimiento_years)
+
+bc.fit.km.10years<-survfit(Surv(seguimiento_years, evento)~riesgo, data=BC_till_10years, type="kaplan-meier")
+print(bc.fit.km.10years, print.rmean=T)
+```
+
+
+La mediana en este caso es el tiempo para el cual la función de supervivencia tiene el valor 0.5. Como vemos en las gráficas del punto anterior [2.2. SLED para grupos pronóstico y HR](#pto22), esto nunca ocurre. 
+
+Para los valores superiores de los intervalos 95% de confianza, $NA$ representa infinito (es común encontrar esto en análisis de supervivencia por el sesgamiento de los datos). Podremos ver los valores exactos de supervicencia y sus intervalos en la  siguiente tabla:
+
+
+```{r}
+summ<-summary(bc.fit.km.10years)
+summ
+
+min(summ$surv)
+```
+
+Efectivamente, a excepción de alto el valor de supervivencia no llega a alcanzar el valor 0.5, por lo tanto, no hay mediana para `BAJO` (menor alcanzado 0.66) e `INTERMEDIO`  (menor alcanzado 0.65), en ninguno de los dos llega a haber pacientes registrados a los 10 años. El subgrupo `ALTO` si alcanza el valor 0.5, siendo su mínimo 0.438 a los 10 años, por lo que sí tiene mediana  (10).
+
+**Interquartile range:**
+
+```{r}
+library(stats)
+
+probs<-c(0.05, 0.5, 0.95)
+quantile(bc.fit.km.10years, probs)
+
+IQR(summ$surv, na.rm = FALSE)
+```
+
+-----
+
+
+
+##  Curva CTS5 vs Prob (SLED) a 5-10 años
+
+**Hacer una curva CTS5 vs probabilidad de recidiva a distancia a 5-10 años como la figura 4 del artículo, con las dos columnas de la derecha tb (riesgo de recidiva a 5-10 años y su correspondiente CTS5).**
+
+*Figure 4: patient age 54 years with a 12-mm, node-negative, grade 2 tumor*.
+ 
+ 
+```{r, message=FALSE}
+library(dplyr)
+```
+
+NO ES ESTO
+HACER PARA TODA POBLACION
+RAYAS ROJAS SON CORTE RIESGO BAJO-INTERMEDIO-ALTO, COMO SE CUANTO VALEN?
+APARTE: FELCHAS NEGRAS SEÑALAN ESTE PACIENTE CONCCRETO:
+
+LA CURVA DE LA FIGURA ES PARAMÉTRICA
+```{r, warning=FALSE}
+selected.patient<-BC %>% filter(edad==54) %>% filter(tumor_size==12) %>% filter(nodal_status=="Negative") %>% filter(grado==2)
+```
+
+
+```{r}
+fit<-survfit(Surv(BC$seguimiento_m, BC$evento)~1) %>% fortify %>% mutate(CumHaz = cumsum(n.event/n.risk))
+
+qplot(time, CumHaz, data=fit, geom="step", xlab="Tiempo(meses)", ylab="Riesgo acumulado", main="Riesgo acumulado")
+```
+
+La curva de la Figura 4, como podemos observar por la suavidad de la curva, está ajustada por un método paramétrico. Probaremos varios para ver cual es más similar.
+
+
+```{r}
+parametricos<-c("exp","gengamma",  "weibull", "llogis", "lnorm", "gompertz")
+#Lista de ajustes de las distribuciones
+fit.param<-sapply(parametricos, function(x) flexsurvreg(Surv(BC$seguimiento_m, BC$evento)~1, dist=x), USE.NAMES=T, simplify=F)
+param.dist<-names(fit.param) %>% sapply(function(x) cbind(dist = x, data.frame(summary(fit.param[[x]]))), simplify = F) %>% do.call("rbind", .)
+x <- (1:length(parametricos)) + 1 
+names(x) <- parametricos  
+ggplot() + geom_line(aes(time, -log(est), col = factor(dist)), param.dist, size=0.9, alpha=0.5) + labs(col = "Distribuciones parametricas", linetype = "Ajustes", x ="Tiempo(meses)", y = "Riesgo acumulado", title = "Comparacion de ajustes parametricos")
+```
+
+`gompertz` parace ser el más similar, por lo que será el que usaremos para replicar la figura.
+
+```{r}
+BC<-BC[BC$re!="N",]
+
+fit.geom<-flexsurvreg(Surv(BC$seguimiento_years, BC$evento)~1, dist="gompertz")
+geom.dist<-names(fit.geom) %>% sapply(function(x) cbind(dist = "gompertz",
+data.frame(summary(fit.geom))), simplify = F) %>% do.call("rbind", .)
+
+ggplot() + geom_line(aes(time, -log(est), col = factor(dist)), geom.dist, size=0.9, alpha=0.5 )+ labs(col = "Distribución", linetype = "Ajustes", x ="Años", y = "DR Risk", title = "Risk Score ER-Positive") 
+```
+
+
+---
+
+##  Valoración de utilidad o rendimiento de la aplicación del score CTS5 en la práctica clínica  {#pto25}
+
+Para valorar la utilidad o el rendimiento de la aplicación del score CTS5 en la práctica clínica (simular el beneficio que obtengo con la hormonoterapia extendida en los diferentes grupos de riesgo o en una paciente con un score CTS5 dado):
+
+
+- **RR**: Riesgo relativo de muerte de pacientes que reciben el tratamiento relativo al grupo de control. $RR=\frac{expuestos\ al\ tratamiento}{no\ expuestos\ al\ tratamiento}$.
+
+- **RRR**: Reducción relativa del riesgo. El tanto por ciento que el tratamiento reduce el riesgo de muerte. $RRR= $(1-RR)*100$. 
+
+- **RRI:** Aumento relativo del riesgo. $RRI=\frac{ARI}{tasa\ grupo\ control}$
+
+
+- **RAR**: Reducción Absoluta del riesgo, tanto por ciento de personas en las que se puede evitar la muerte por aplicar el tratamiento. $RAR= (no\ expuestos\ al\ tratamiento - expuestos\ al\ tratamiento)*100$.
+
+- **NNT**: Número necesario de pacientes a tratar para reducir un evento (recurrencia). $NTT =\frac{1}{RAR}$.
+
+
+- **ARI:** Aumento absoluto del riesgo. $ARI=tasa \ grupo \ experimental - tasa\ grupo\ control$
+
+
+- **NNH**: Número de pacientes que es necesario tratar para que un pacientesufra un evento adverso. $NNH=1/ARI$
+
+
+### NNT/NNH/ARR/RRR para los EECC de hormonoterapia extendida  - FALTAN LOS DATOS
+
+Calcular el NNT/NNH/Absolute Risk Reduction (ARR)/Relative Risk Reduction (RRR%) para los EECC de hormonoterapia extendida. Habrá que tener en cuenta el end-point de los EECC de hormonoterapia extendida si es solo recidiva a distancia o por CM (distancia+loco-regional+contralateral). Usar solo el número de eventos a distancia. Hacer una tabla.
+
+
+
+
+### Aplicación del RRR, NNT a grupos de riesgo  {#pto252}
+
+**Aplicar el RRR% al riesgo de cada uno de los tres grupos de riesgo y ver si para el riesgo resultante hay alguna manera de calcular el NNT (para reducir el riesgo inicial al riesgo resultante). **
+
+
+**Según hormonoterapia** 
+
+```{r}
+levels(BC$ht)
+```
+
+Todos han sido expuestos a hormonoterapia, por lo que no se puede hacer distinción entre grupo expuesto al tratamiento y grupo de control.
+
+
+
+**Según quimioterapia**
+
+
+```{r}
+levels(BC$qt)
+
+tasa.qt<-function(poblacion) {
+ expuestos_qt<-vector()
+ no_expuestos_qt<-vector()
+ for(r in 1:nrow(poblacion)) {
+    ifelse( poblacion[r,]$qt=="NO",  no_expuestos_qt<-c(no_expuestos_qt, poblacion[r,]$evento), expuestos_qt<-c(expuestos_qt, poblacion[r,]$evento))
+  }
+ muerte_expuestos=sum(expuestos_qt==1)/length(expuestos_qt)
+ muerte_no_expuestos<-sum(no_expuestos_qt==1)/length(no_expuestos_qt)
+ return(list("muerte.expuestos"=muerte_expuestos, "muerte.no.expuestos"=muerte_no_expuestos))
+}
+
+```
+
+En general podemos ver que el porcentaje de muerte de aquellos expuestos al tratamiento de quimioterapia es mayor que los no expuestos. Los resultados no contradicen a lo expuesto en el artículo: la quimioterapia no mejora la supervivencia en el cancer de mama. La diferencia seguramente se deba a la distribución de estos datos en concreto. Asimismo, también podemos ver que el porcentage de muertes es mayor a mayor riesgo.
+
+```{r}
+
+calculate.RRR.NTT<-function(expuestos, no.expuestos) {
+  RR=expuestos/no.expuestos
+  RRR=(1-RR)*100
+  RAR=(no.expuestos-expuestos)
+  NNT=round(1/RAR)
+  return(list("RRR"=paste(RRR, "%"), "NNT"=NNT))
+}
+
+```
+
+Los resultados con los que hemos creado las siguientes tablas podemos encontrarlos en [Resultados 2.5.2](#resultados252).
+
+
+**% Muerte**
+
+|          | Expuestos | No expuestos | 
+|----------|----------|------------|
+|Todos     | 14%      | 5.9%       | 
+|Bajo      | 6%      | 5.4%       | 
+|Intermedio |  7.7%      |  5.5%       |   
+|Alto       |  19%   |  7.4%    |     
+
+**RRR, NNT**
+
+
+|          | RRR      |      NNT | 
+|----------|----------|------------|
+|Bajo      | -10.9%      | -167  | 
+|Intermedio |  -36.5%      |  -49       |   
+|Alto       |  -157.3%   |  -9  |     
+
+
+Como ya habiamos visto, el riesgo no mejora por haber aplicado quimioterapia, en este caso empeora más cuanto mayor es el riesgo. Por lo tanto, el $NNT$ no tiene sentido calcularlo, ya que no podemos reducir el evento por tratar a los pacientes con quimioterapia.
+
+
+Tenemos las **hipótesis**:
+
+- $H_0$: no hay diferencia en la funciñon de supervivencia al recibir quimioterpaia o no.
+- $H_1$: recibir quimioterapia o no si marca una diferencia en la función de supervivencia.
+
+Estableceremos una confianza del 95%, por lo que aceptaremos la hipótesis nula si $p-value>0.05$ o probabilidad del 95% de que $H_0$ sea verdarera. En caso contrario la rechazaremos y aceptaremos la hipótesis alternativa $H_1$.
+
+La función `survdiff()` nos permite realizar comparación por parejas de forma no paramétrica de funciones de supervivencia, (Es la forma interna que tiene survminer de calcualar el *pvalue* que veiamos representado en las gráficas). Podremos observar sus correspondientes *pvalue* y $χ2$.
+
+**LogRank** nos da la similitud entre dos grupos. La suma de las dos últimas columnas nos darán el valor de $χ2$.
+
+Chi Square: $χ2=\frac{(01−E1)^2}{E1}+\frac{(02−E2)^2}{E2}$, explica como son os resultados observados en comparación con los esperados. Es otra manera de aceptar o rechazar la hipótesis nula
+
+Estimación de riesgo: $OR=\frac{01/E1}{02/E2}$
+
+
+```{r}
+survdiff(Surv(seguimiento_years, evento)~chemotherapy_group, data=BC)
+```
+
+$X_{1}^2=11.7$, $p-value=6e-04<0.05$, rechazamos la hipótesis nula $H_0$ y **aceptamos la hipótesis alternativa** $H_1$ , donde recibir o no quimioterapia si tiene una diferencia estadística significante en la supervivencia.
+
+Usando **Regresión de Cox**, llevaremos a cabo un test para corroborarlo y ver como es esa influencia:
+
+```{r}
+coxph(Surv(seguimiento_years, evento)~chemotherapy_group, data=BC)
+```
+
+`exp(coef)` representa el *Hazard Ratio*, si  HR>1, la variable tendrá un efecto de aumento del riesgo.
+
+Según el test, el aplicamiento o no de quimioterapia está significantemente relacionado con la supervivencia (p=0.000451) con mejor supervivencia en el grupo de no quimioterapia. El grupo que si recibe quimioterapia tiene un Hazard ratio de recurrencia 2.17 veces riesgo de morir en comparación con las que no reciben quimioterapia.
+
+
+
+
+###  NNT/NNH teóricos para aceptación de tratamientos 
+
+**Mirar a ver cual es el NNT/NNH teóricos a partir de los cuales se considera aceptable un tratamiento para ser adoptado en la práctica clínica.**
+
+Como hemos visto en el punto [2.5. Valoración de utilidad o rendimiento](#pto25) el valor *NNT* indica el número necesario de pacientes a tratar para reducir un evento, y el *NNH* el número de pacientes que es necesario tratar para que un pacientesufra un evento adverso.
+
+
+Veremos estos valores para todos los tratamientos de hormonoterapia distintos aplicados a estas pacientes.
+
+
+**Hormonoterapia: **
+
+```{r}
+
+tasa.ht<-function(tratamiento, poblacion) {
+  expuestos<-vector()
+  no.expuestos<-vector()
+ for(r in 1:nrow(poblacion)) {
+    ifelse( poblacion[r,]$ht==tratamiento,  expuestos<-c(expuestos, poblacion[r,]$evento), no.expuestos<-c(no.expuestos, poblacion[r,]$evento))
+  }
+ muerte_expuestos=sum(expuestos==1)/length(expuestos)
+ muerte_no_expuestos<-sum(no.expuestos==1)/length(no.expuestos)
+ return(list("muerte.expuestos"=muerte_expuestos, "muerte.no.expuestos"=muerte_no_expuestos))
+}
+
+tratamiento.ht<-vector()
+tasa.control<-vector()
+tasa.experimental<-vector()
+NNT<-vector()
+NNH<-vector()
+for (tratamiento in levels(BC$ht)) {
+  tratamiento.ht<-c(tratamiento.ht, tratamiento)
+  tasa.control<-c(tasa.control, tasa.ht(tratamiento, BC)$muerte.no.expuestos)
+  tasa.experimental<-c(tasa.experimental,tasa.ht(tratamiento, BC)$muerte.expuestos)
+  NNT<-c(NNT, round(1/((tasa.ht(tratamiento, BC)$muerte.no.expuestos-tasa.ht(tratamiento, BC)$muerte.expuestos))))
+  NNH<-c(NNH,round(1/((tasa.ht(tratamiento, BC)$muerte.expuestos-tasa.ht(tratamiento, BC)$muerte.no.expuestos))) )
+}
+
+NNT.tratamientos<-data.frame(tratamiento.ht, tasa.control, tasa.experimental, NNT, NNH)
+names(NNT.tratamientos)<-c("Tratamiento hormonoterapia", "Tasa grupo control", "Tasa grupo experimental", "NNT", "NNH")
+NNT.tratamientos[order(NNT),]
+
+```
+
+Los primeros 4 tratamientos (*TAMOXIFENO, ANALOGOS-TAMOXIFENO, IA, ANALOGOS*) no parecen mejorar la supervivencia, por lo que su NNT es inválido. Para el resto, los tratamientos más eficientes parecen ser *TAMOXIFENO-ANALOGOS-IA* y *ANALOGOS-IA* con yna media de 9 pacientes necesarios para evitar un suceso de recurrencia. *TAMOXIFENO-IA* y *INHIBIDORES AROMATASA* también parecen tener buenos resultados eficientes pero no demasiado buenos, pudiendo un suceso con 50 y 70 pacientes tratados.
+
+
+---
+
+##  Analizar las posibles diferencias entre las características de nuestras pacientes y las de los ensayos ATAC y BIG1-98 (Tabla-1).
+
+Para comparar nuestros pacientes con los del paper de la forma más exacta posible, crearemos los grupos usados en este (*ATAC* y *BIG 1-98*) siguiendo las mismas características de inclusión de pacientes descritas:
+
+- ATAC: *.. postmenopausal women with ER-positive or ER-unknown .. randomly assigned to receive anastrozole .. or tamoxifen .. or a combination .. We included data from women with ER-positive breast cancer randomly assigned to receive anastrozole alone or tamoxifen alone, who were distant recurrence free after 5 years of follow-up. N = 4,735, Median follow-up was 9.8 years. *
+
+```{r}
+ht.with.tamoxifen<-c("TAMOXIFENO-ANALOGOS-IA", "TAMOXIFENO-IA", "TAMOXIFENO", "ANALOGOS-TAMOXIFENO")
+
+#postmenopausical + er P or ND + tamoxifeno
+ATAC.1<-BC %>% filter(estado_menop=="Postmenopausica") %>% filter(ht %in% ht.with.tamoxifen) %>% filter(re!="N")
+#>5 años con evento=0 + er P + tamoxifeno
+ATAC.2<-BC %>% filter(seguimiento_years>=5) %>% filter(evento==0) %>% filter(ht %in% ht.with.tamoxifen) %>% filter(re!="N")
+ATAC<-unique(rbind(ATAC.1, ATAC.2))
+```
+
+- BIG 1-98: *.. randomly assigned postmenopausal women with hormone receptor–positive .. letrozole.. or tamoxifen ... For this analysis, all women were included who were distant recurrence free at 5 years. N = 6,711. Median follow-up 8.1 years*
+
+```{r}
+
+#postmenopausical + er P  tamoxifeno
+BIG.1<-BC %>% filter(estado_menop=="Postmenopausica") %>% filter(ht %in% ht.with.tamoxifen) %>% filter(re!="N")
+#distant recurrence free after 5 years
+BIG.2<-BC %>% filter(seguimiento_years>=5) %>% filter(evento==0) 
+BIG<-unique(rbind(BIG.1, BIG.2))
+```
+
+
+*For both trials, women were included in the analysis regardless of whether they received chemotherapy.*
+
+
+
+Dada la grándisima diferencia en el número de pacientes (695 frente a 4,735 y 825 frente a 6,711) para poder hacer una comparación más coherente solamente veremos los resultados en proporción respecto al total de pacientes en cada caso.
+
+|          | Our ATAC | Paper ATAC | Our BIG 1-98 | Paper BIG 1-98 |
+|----------|----------|------------|--------------|----------------|
+| **N**    | 695      | 4,735       | 825          | 6,711           |
+|**Age**                                                           |
+|Median    |  57      |  64       |     57        | 61             |
+|IQR       |  47-67   |  57-71    |     49-68        | 56-67      |
+|**Nodal Status**                                                  |
+|Negative  |   57%  |   68%     | 56.7%            |      60.9%     |
+| 1        |16.7%  |   13.6%     | 17%            |      17.3%     |
+| 2-3     |   14.1%  |   11.1%     |13.9%            |      11.6% |
+| 4-9     |   9.4%  |   5.9%     | 9.2%            |      7.5%     |
+| 9+      |   2.6%  |   1.5%     | 3.2%            |      2.6%     |
+|**Tumor size, mm**                                                 | 
+|<10  |   11.8%  |   19.7%     | 12.1%            |      17.5%     |
+| 10-20   |48.1%  |   49.8%     | 48.9%            |      47.8%     |
+| 20-30   |  21.7%  |   25.2%     |23.4%            |      24.5% |
+| >30   |   10.3%  |   14.8%     | 11.4%            |      14.4%     |
+|**Chemoterapy**|54.2% |19.5%   |52.4%              |     24.2%      |  
+|**Distant recurrence**|6.3% |7%   |5.3%           |     5.5%      |   
+|**Annual Rate ** | 3.8% |0.79%   | 3.23%           |    0.66 %      |  
+|**95% CI% ** | NA  |0.71 to 0.88   | NA          |     0.60 to 0.73      |  
+
+
+A pesar de las diferencias, en general hay bastante similitud en los datos.
+
+- Edad: La edad promedio de las pacientes del papaer es mayor, aumentando más en ATAC, nuestros grupos son menores y nmás similares entre sí.
+
+- Estado nodal: Esta es de las variables más similares. Para todos el grupo negativo contiene más de la mitad de las pacientes. Las pacientes del paper tienen más cantidad en este grupo que las nuestras (57%). Para el resto de grupos donde sí hay nodos hay una mayor proporción en nuestras pacientes. El grupo de 1 y 2-3 nodos es muy similar, en 4-9 y 9+ aunque no mucha, si vemos algo de diferencia, teniendo las pacientes del papaer menos cantidad de nodos.
+
+- Tamaño del tumor: Exceptuando el grupo de menos de 10 mm, el resto también se asemjan mucho nuestras pacientes y las del paper. Para el tamaño <10 hay una mayor proporción en las pacientes del paper. 10-20 es muy similar. 20-30 también es muy similar, habiendo por muy poca diferencia algunas pacientes más en el dataset del paper. Para >30 también hay mayor proporción de pacoentes en el paper. Para  las nuestras, las proporciones son mayores en BIG que en ATAC, para el paper son algo mayores en ATAC.
+
+- Quimioterapia: Aquí si encontramos una diferencia significante, en nuestros datos algo más de la mitad de pacientes han recibido quimioterapia en ambos grupos, mientras que en las pacientes del paper solo alrededor del 20%.
+
+- Distant recurrence y annual rate: la recureencia en pacientes pasado los 5 años del inicio del tratamiento es similar, pero la tasa de recurrencia anual es  mayor en nuestras pacientes, triplicando su valor. Posiblemente se deba a la quimioterapia recibida, como hemos visto en el punto [2.5.2. Aplicación RRR, NNT a grupos de riesgo, según quimioterapia](#pto252).
+
+Ya hemos visto en el punto [2.3. Mediana e intervalos SLED](#pto23) la razón de que los intervalos de confianza sean $NA$ (Inf).  
+
+En la *Tabla 1* del paper también indican los valores de los **p-values** de la significancia de la diferencia entre grupos para cada variable.
+
+Veamos las curvas de supervivencia para sus grupos de las variables estudiadas, así como sus p-values y los p-values de regresión de Cox (Paper: *Cox proportional hazards models were used to create the model*).
+
+
+```{r, message=FALSE}
+library(FSelector)
+```
+
+```{r, warning=FALSE}
+list.curves.pvalues<-function(df, variables) {
+  grid.list<-list()
+  pvalues.list<-list()
+  cox.pvalues.list<-vector()
+  for(v in 1:length(variables)) {
+    var<-variables[v]
+    formula <- as.formula(paste("Surv(seguimiento_m, evento)", var, sep=" ~ "))
+    cox.pvalues.list[v]<-summary(coxph(formula, data=df))$logtest[3]
+    fit<-surv_fit(formula, data=df)
+    pvalues.list[[v]]<-surv_pvalue(fit,  data = NULL, method = "survdiff", test.for.trend = FALSE,combine = FALSE)
+    grid.list[[v]]<-ggsurvplot(fit, data=df, xlab = "Tiempo", censor = T,  ylab = "Survival Probability", title = paste("Survival ", var),ylim=c(0.6,1))
+  }
+  return(list(grid.list, pvalues.list, cox.pvalues.list))
+} 
+
+variables<-c("GrupoEdadCluster", "nodal_status", "riesgo", "tumor_size_group", "chemotherapy_group")
+atac<-list.curves.pvalues(ATAC, variables)
+arrange_ggsurvplots(atac[[1]], print=TRUE, ncol=2, nrow=3)
+
+```
+
+
+Los resultados de los que se han creado las tablas podemos verlos en [Resultados 2.6.](#resultados26)
+
+
+|          | Our ATAC |  Our BIG 1-98 | Cox | Paper |
+|----------|----------|------------   |------|------|
+| **Age**    | 0.0037      | 0.007      |- |   <.001         |
+| **Clustered Age**    | < 0.0001    | 1.78e-07| < 0.0001       |   -        |
+| **Nodal Status**    |  < 0.0001     |0.00032 | < 0.0001      | <.001         |
+| **Grade**    | 0.0038     | 0.0048    |0.004   |  .007          |
+| **Tumor size**    | 0.34     | 0.29       |0.34|      0.44   | 
+| **Chemoteraphy**    | 0.07      | 0.053    |  0.065 | <.001         | 
+
+
+- Edad: significancia muy similar y no demasiado alta ($10^-{3}$).  La edad clusterizada no la realizan en los ensayos, pero parece ser  más significante que la edad sin clusterizar ($10^-4$ y $10^-7$ en BIG).
+
+- Estado nodal: En los ensayos es del orden de $10^{-3}$, al igual que la edad, mientras que en nuestras pacientes es del orden de $10^-{4}$.
+
+- Grado del tumor: Orden $10^-{3}$ en todos los casos.
+
+- Tamaño del tumor: no es estadísticamente significante en ninguno de los test, no bajando de las décimas. Aún así, para los ensayos es ligeramente menos significante.
+
+- La quimioterapia tiene significancia $10^-{3}$ en los ensayos, mientras que $10^-2$ en nuestras pacientes. Cabe recordar que nosotros teníamos muchas más pacientes que habian recibido quimioterapia.
+
+Los resultados son en general muy similares, a grandes rasgos podemos destacar: 
+
+(1) Respecto a la **distribución de datos**: Los ensayos tienen un número mucho más elevado de caso que nosotros. La edad media de las pacientes de los ensayos es mayor. El estado nodal y tamaño del tumor se distribuyen de forma muy similar, donde más de la mitad de pacientes no tienen nodos, y para las que tienen casi la mitad se encuentran en el grupo $[10mm,20mm]$, seguido por $[20mm,30mm]$. La quimioterapia es en el que mayor diferencia hemos encontrado, recibiendola más de la mitad de nuestras pacientes mientras en los ensayos es solo un 20%. La tasa de ocurrencia es mucho mayor en nuestros datos.
+
+
+(2) Respecto a **significancia en diferencia de curvas**:  la más significante para nosotros es el estado nodal. Para los ensayos tienen el mismo orden de significancia la edad, el estado nodal, el grado y la quimioterapia, donde exceptuando la quimioterapia coinciden con los nuestros. La menos significante para ambos es el tamaño del tumor.
+
+
+
+
+
+# Resultados
+
+Aquí encontraremos los resultados con más detalle.
+
+
+### Curvas riesgo completas {#resultados21}
+
+Toda la población
+```{r}
+bc.fit.ra
+```
+
+Premenopausicas y Postmenopausicas
+
+```{r}
+bc.fit.menos
+```
+
+Luminal A y Luminal B
+
+```{r}
+bc.fit.lum
+```
+
+###  Valores de utilidad o rendimiento
+
+
+#### Valores proporción muertes, RRR y NNT para expuestos y no expuestos. {#resultados252}
+
+Proporciones de riesgo de muerte.
+
+```{r}
+all<-tasa.qt(BC)
+all
+riesgo.bajo<-tasa.qt(BC[BC$riesgo=="BAJO",])
+riesgo.bajo
+riesgo.intermedio<-tasa.qt(BC[BC$riesgo=="INTERMEDIO",])
+riesgo.intermedio
+riesgo.alto<-tasa.qt(BC[BC$riesgo=="ALTO",])
+riesgo.alto
+```
+
+RRR, NNT.
+
+```{r}
+RRR.bajo.riesgo=calculate.RRR.NTT(riesgo.bajo$muerte.expuestos, riesgo.bajo$muerte.no.expuestos)
+RRR.bajo.riesgo
+RRR.intermedio.riesgo=calculate.RRR.NTT(riesgo.intermedio$muerte.expuestos, riesgo.intermedio$muerte.no.expuestos)
+RRR.intermedio.riesgo
+RRR.alto.riesgo=calculate.RRR.NTT(riesgo.alto$muerte.expuestos, riesgo.alto$muerte.no.expuestos)
+RRR.alto.riesgo
+```
+
+
+### Comparación pacientes y las de los ensayos Paper {#resultados26}
+
+Proporciones de ATAC y BIG en nuestras pacientes para las variables a comparar
+
+```{r}
+nrow(ATAC)
+nrow(BIG)
+median(ATAC$edad)
+quantile(ATAC$edad, c(0.25, 0.5, 0.75))
+median(BIG$edad)
+quantile(BIG$edad, c(0.25, 0.5, 0.75))
+prop.table(table(ATAC$nodal_status))
+prop.table(table(BIG$nodal_status))
+prop.table(table(ATAC$tumor_size_group))
+prop.table(table(BIG$tumor_size_group))
+prop.table(table(ATAC$chemotherapy_group))
+prop.table(table(BIG$chemotherapy_group))
+ATAC.distant.recurrence<- ATAC %>% filter(seguimiento_years>=5) %>% filter(evento==1) 
+cat("Distant recurrence ATAC: ", nrow(ATAC.distant.recurrence)/nrow(ATAC)*100, "% ")
+BIG.distant.recurrence<- BIG %>% filter(seguimiento_years>=5) %>% filter(evento==1)
+cat("Distant recurrence BIG: ",nrow(BIG.distant.recurrence)/nrow(BIG)*100, "%")
+
+ATAC.distant<- ATAC %>% filter(seguimiento_years>=5)
+BIG.distant<- BIG %>% filter(seguimiento_years>=5) 
+survfit(Surv(seguimiento_m, evento)~1, data=ATAC.distant)
+survfit(Surv(seguimiento_m, evento)~1, data=BIG.distant)
+```
+
+Media anual rate de todos los años 
+```{r}
+distant.recurrence<-function(df) {
+  min.year<-round(min(df$seguimiento_years))
+  max.year<-round(max(df$seguimiento_years))
+  percentages<-vector()
+  for(year in min.year:max.year) {
+    data.year<- df %>% filter(round(seguimiento_years)==year)
+    distant.recurrence<-data.year %>% filter(seguimiento_years>=5) %>% filter(evento==1)
+    percentages[year-5]<-nrow(distant.recurrence)/nrow(data.year)*100
+    mean.recurrence=mean(percentages)
+  }
+  return(mean.recurrence)
+}
+cat("Distant recurrence ATAC: ", distant.recurrence(ATAC))
+cat("Distant recurrence BIG: ", distant.recurrence(BIG))
+```
+
+pvalues
+
+```{r}
+#ATAC
+pvalues.atac<-atac[[2]]
+surv_pvalue(surv_fit(Surv(seguimiento_m, evento)~edad, data=ATAC),  data = NULL, method = "survdiff", test.for.trend = FALSE)
+pvalues.atac
+
+#BIG
+pvalues.big<-list.curves.pvalues(BIG, variables)[[2]]
+surv_pvalue(surv_fit(Surv(seguimiento_m, evento)~edad, data=BIG),  data = NULL, method = "survdiff", test.for.trend = FALSE)
+pvalues.big
+```
+
+pvalues Regresión Cox 
+
+```{r}
+atac[[3]]
+```
+
